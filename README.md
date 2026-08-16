@@ -32,14 +32,15 @@ Client-Seite (siehe `docker-borg-backup`).
 | `sshd_config.template`       | Minimal-Config: nur Pubkey-Auth, kein PAM, kein Shell-Zugriff für irgendeinen User. Krypto-Platzhalter, siehe "SSH-Härtung". |
 | `compose.yml`                | Ein Service `borg-server`. Image kommt vorgebaut von GHCR, `build: .` ist Fallback. |
 | `entrypoint.sh`              | Rendert `sshd_config` aus dem Template, baut beim Start `authorized_keys`, leitet den Hostkey-Public-Part ab, startet `sshd`. |
-| `build-authorized-keys.sh`   | Erzeugt `authorized_keys` aus `keys/backup/*.pub` + `keys/admin/*.pub`, je mit passendem Forced Command. Läuft beim Start UND bei Bedarf erneut im laufenden Container, siehe `reload-keys.sh`. |
+| `build-authorized-keys.sh`   | Erzeugt `authorized_keys` aus `keys/backup/*.pub` + `keys/admin/*.pub`, je mit passendem Forced Command (oder übernimmt `keys/manual/authorized_keys` 1:1, siehe "Manueller Modus"). Läuft beim Start UND bei Bedarf erneut im laufenden Container, siehe `reload-keys.sh`. |
 | `setup-secrets.sh`           | Erzeugt einmalig `secrets/ssh_host_ed25519_key` (idempotent). |
-| `add-backup-key.sh`          | Registriert einen neuen Backup-Client: `./add-backup-key.sh <name> <pubkey-datei>`. |
-| `add-admin-key.sh`           | Registriert einen neuen Admin-Key: `./add-admin-key.sh <name> <pubkey-datei>`. |
-| `reload-keys.sh`             | Baut `authorized_keys` im laufenden Container neu, ohne Neustart — unterbricht keine laufenden Sessions anderer Clients. |
+| `add-backup-key.sh`          | Registriert einen neuen Backup-Client: `./add-backup-key.sh <name> <pubkey-datei>`. Ruft am Ende automatisch `reload-keys.sh` auf. |
+| `add-admin-key.sh`           | Registriert einen neuen Admin-Key: `./add-admin-key.sh <name> <pubkey-datei>`. Ruft am Ende automatisch `reload-keys.sh` auf. |
+| `reload-keys.sh`             | Baut `authorized_keys` im laufenden Container neu, ohne Neustart — unterbricht keine laufenden Sessions anderer Clients. Nach dem *manuellen* Löschen einer `.pub`-Datei selbst aufrufen. |
 | `.env` / `.env.example`      | `SSH_PORT`, optionale `SSHD_*`-Krypto-Overrides. |
 | `secrets/`                   | SSH-Hostkey dieses Servers. Pro Deployment eigen, nicht committen. |
 | `keys/backup/`, `keys/admin/`| Public Keys der Clients/Admins. Pro Deployment eigen, nicht committen. |
+| `keys/manual/`               | Optional: fertige `authorized_keys` von außen, siehe "Manueller Modus". Pro Deployment eigen, nicht committen. |
 | `DEVELOPMENT.md`             | Für Mitarbeit am Repo selbst: lokale Checks, CI/Release-Pipeline. |
 
 ## Ersteinrichtung
@@ -78,7 +79,9 @@ Client-Seite (siehe `docker-borg-backup`).
 
    `<client-name>` wird zum Verzeichnisnamen unter `/data` (das Repo dieses
    Clients) — nur Buchstaben, Ziffern, `_`, `-`. Das Skript gibt am Ende
-   direkt die passenden `.env`-Werte für den Client aus.
+   direkt die passenden `.env`-Werte für den Client aus. Der Hinweis
+   "Server läuft noch nicht" an dieser Stelle ist bei der Ersteinrichtung
+   normal (Schritt 6 startet den Container erst) — kein Fehler.
 
 5. **Optional: einen Admin-Key registrieren** (für `admin-compact.sh` /
    `admin-shell.sh` aus `docker-borg-backup`, per Agent-Forwarding, NIE als
@@ -95,11 +98,13 @@ Client-Seite (siehe `docker-borg-backup`).
    docker compose up -d
    ```
 
-   Jeder weitere `add-backup-key.sh`/`add-admin-key.sh`-Aufruf braucht danach
-   nur noch `./reload-keys.sh`, damit `authorized_keys` neu gebaut wird —
-   **ohne** den Container neu zu starten (wichtig, wenn gerade ein
-   laufender Backup-Transfer eines anderen Clients nicht unterbrochen
-   werden soll, siehe "Key-Rotation/-Entzug" unten).
+   Jeder weitere `add-backup-key.sh`/`add-admin-key.sh`-Aufruf baut
+   `authorized_keys` danach automatisch neu (`reload-keys.sh` wird am Ende
+   der beiden Skripte selbst aufgerufen) — **ohne** den Container neu zu
+   starten (wichtig, wenn gerade ein laufender Backup-Transfer eines
+   anderen Clients nicht unterbrochen werden soll, siehe
+   "Key-Rotation/-Entzug" unten). Nur beim *manuellen* Löschen einer
+   `.pub`-Datei `./reload-keys.sh` selbst aufrufen.
 
 ## Sicherheitsmodell
 
@@ -183,6 +188,48 @@ in seinem eigenen `/data/<name>`, `--restrict-to-repository` verhindert
 strikt, dass ein Backup-Key auf das Repo eines anderen Clients zugreifen
 kann (selbst wenn beide Repos existieren). Ein Admin-Key sieht dagegen alle.
 
+## Manueller Modus: fertige `authorized_keys` von außen reinreichen
+
+`add-backup-key.sh`/`add-admin-key.sh` decken den normalen Fall ab (ein Key
+= ein Repo, append-only oder voller Zugriff). Für alles, was darüber
+hinausgeht — mehrere Forced-Command-Varianten für denselben Key, eigene
+`restrict`-Flags, eine bestehende `authorized_keys` von einem anderen Setup
+übernehmen, Kommandos jenseits von `borg serve` — legt eine fertige Datei
+unter `keys/manual/authorized_keys` ab:
+
+```bash
+mkdir -p keys/manual
+cat > keys/manual/authorized_keys <<'EOF'
+command="borg serve --append-only --restrict-to-repository /data/hostA",restrict ssh-ed25519 AAAA... hostA
+command="borg serve --restrict-to-path /data",restrict ssh-ed25519 AAAA... admin1
+EOF
+./reload-keys.sh
+```
+
+**Sobald diese Datei existiert, wird sie 1:1 als `authorized_keys`
+übernommen — `keys/backup/*.pub` und `keys/admin/*.pub` werden komplett
+ignoriert.** `add-backup-key.sh`/`add-admin-key.sh` warnen davor, wenn der
+manuelle Modus aktiv ist (der neu registrierte Key würde sonst wirkungslos
+in `keys/backup/`/`keys/admin/` liegen bleiben). Zurück in den generierten
+Modus: `keys/manual/authorized_keys` löschen, dann `./reload-keys.sh`.
+
+`build-authorized-keys.sh` kopiert die Datei nur (kein Parsing, keine
+Prüfung der Forced-Command-Syntax) — für Inhalt und Syntax bist du in
+diesem Modus selbst verantwortlich; ein Tippfehler dort schlägt erst beim
+tatsächlichen Verbindungsversuch fehl, nicht beim Reload selbst.
+
+**Warum wird die Datei kopiert, statt `sshd` direkt auf den Mount zu
+zeigen?** Das wäre naheliegend — sshd liest ohnehin bei jeder Verbindung
+frisch, ein direkter Verweis bräuchte also nicht mal `./reload-keys.sh`.
+Geht aber nicht: `sshd`s `StrictModes`-Prüfung verlangt, dass
+`authorized_keys` dem Zieluser oder `root` gehört. Eine gemountete Datei
+gehört aber dem UID, der sie auf dem *Host* angelegt hat — sshd verweigert
+dann jede Anmeldung damit ("Authentication refused: bad ownership or modes
+for file ..."), unabhängig vom Inhalt. Der Copy-Schritt (`chown`, `chmod
+600`, atomar) übernimmt die Rechtekontrolle deshalb bewusst selbst,
+unabhängig davon, wem die Quelldatei auf dem Host gehört — kostet dafür den
+einen zusätzlichen `reload-keys.sh`-Aufruf nach jeder manuellen Änderung.
+
 ## Mehrere Borg-Versionen
 
 Ähnlich wie Hetzners Storage Box mehrere Server-Binaries parallel anbietet
@@ -229,7 +276,11 @@ docker compose exec borg-server sh -c 'ls /usr/local/bin/borg-*'
 
 ## Key-Rotation/-Entzug ohne Unterbrechung laufender Sessions
 
-Datei unter `keys/backup/` bzw. `keys/admin/` anlegen/löschen/ersetzen, dann:
+Neuen Key eintragen: `add-backup-key.sh`/`add-admin-key.sh` rufen
+`reload-keys.sh` am Ende automatisch selbst auf, kein weiterer Schritt
+nötig. Nur beim *manuellen* Löschen/Ersetzen einer Datei unter
+`keys/backup/` bzw. `keys/admin/` (z.B. `rm keys/backup/<name>.pub`)
+danach selbst aufrufen:
 
 ```bash
 ./reload-keys.sh

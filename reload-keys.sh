@@ -14,6 +14,11 @@
 #
 #   ./reload-keys.sh
 #
+# add-backup-key.sh/add-admin-key.sh rufen das am Ende automatisch mit auf -
+# laeuft der Container noch nicht (z.B. bei der Ersteinrichtung, vor dem
+# ersten "docker compose up -d"), ist das kein Fehler: der naechste Start
+# baut authorized_keys ohnehin frisch aus dem aktuellen Inhalt von keys/.
+#
 # Fuer SSHD_PUBKEY_ALGORITHMS/SSHD_KEX_ALGORITHMS/SSHD_CIPHERS/SSHD_MACS in
 # der .env reicht das NICHT - die werden nur beim Container-Erstellen
 # gelesen, dafuer braucht es "docker compose up -d" (siehe README).
@@ -22,5 +27,10 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${BASE_DIR}"
+
+if [ -z "$(docker compose ps -q borg-server 2>/dev/null)" ]; then
+    echo "Server laeuft noch nicht - kein Reload noetig, der naechste 'docker compose up -d' baut authorized_keys frisch."
+    exit 0
+fi
 
 docker compose exec -T borg-server /usr/local/bin/build-authorized-keys.sh

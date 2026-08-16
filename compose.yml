@@ -24,6 +24,10 @@ services:
       - ./secrets/ssh_host_ed25519_key:/etc/ssh/ssh_host_ed25519_key:ro
       - ./keys/backup:/keys/backup:ro
       - ./keys/admin:/keys/admin:ro
+      # Optionaler zweiter Modus: liegt hier eine Datei "authorized_keys",
+      # wird die 1:1 uebernommen und keys/backup/+keys/admin/ ignoriert -
+      # siehe README "Manueller Modus".
+      - ./keys/manual:/keys/manual:ro
 
 volumes:
   borg-data:

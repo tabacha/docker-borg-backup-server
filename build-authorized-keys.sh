@@ -8,6 +8,14 @@
 #
 #   docker compose exec -T borg-server /usr/local/bin/build-authorized-keys.sh
 #
+# ZWEITER MODUS - manuell fertige Datei von aussen reinreichen: liegt unter
+# keys/manual/authorized_keys eine Datei (siehe compose.yml-Mount
+# /keys/manual), wird die 1:1 als authorized_keys uebernommen und
+# keys/backup/*.pub + keys/admin/*.pub werden komplett IGNORIERT - fuer
+# Setups, die mehr Kontrolle brauchen als add-backup-key.sh/add-admin-key.sh
+# bieten (z.B. mehrere Forced-Command-Varianten pro Key, eigene
+# restrict-Flags, eine bereits bestehende authorized_keys von woanders
+# migrieren). Siehe README "Manueller Modus".
 # sshd liest authorized_keys ohnehin bei JEDER Verbindung neu vom Datei-
 # system (kein In-Memory-Cache ueber die Laufzeit des Daemons) - ein Reload
 # heisst also nur "Datei aktualisieren", kein Signal an sshd noetig. Bereits
@@ -52,11 +60,24 @@ set -euo pipefail
 AUTHORIZED_KEYS="/home/borg/.ssh/authorized_keys"
 AUTHORIZED_KEYS_TMP="$(mktemp "${AUTHORIZED_KEYS}.XXXXXX")"
 DATA_DIR="/data"
+MANUAL_AUTHORIZED_KEYS="/keys/manual/authorized_keys"
 
 # Aufraeumen, falls das Skript vor dem abschliessenden "mv" abbricht (z.B.
 # resolve_borg_binary() weiter unten mit "exit 1") - sonst sammeln sich bei
 # wiederholten fehlgeschlagenen Reloads Tmp-Dateien im .ssh-Verzeichnis an.
 trap 'rm -f "${AUTHORIZED_KEYS_TMP}"' EXIT
+
+if [ -f "${MANUAL_AUTHORIZED_KEYS}" ]; then
+    if [ ! -s "${MANUAL_AUTHORIZED_KEYS}" ]; then
+        echo "WARNUNG: ${MANUAL_AUTHORIZED_KEYS} existiert, ist aber leer - niemand kann sich verbinden." >&2
+    fi
+    cp "${MANUAL_AUTHORIZED_KEYS}" "${AUTHORIZED_KEYS_TMP}"
+    chown borg:borg "${AUTHORIZED_KEYS_TMP}"
+    chmod 600 "${AUTHORIZED_KEYS_TMP}"
+    mv "${AUTHORIZED_KEYS_TMP}" "${AUTHORIZED_KEYS}"
+    echo "Manueller Modus: ${MANUAL_AUTHORIZED_KEYS} 1:1 uebernommen, keys/backup/ und keys/admin/ ignoriert."
+    exit 0
+fi
 
 resolve_borg_binary() {
     local pubkey_file="$1"

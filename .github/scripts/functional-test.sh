@@ -51,7 +51,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${WORKDIR}/secrets" "${WORKDIR}/keys/backup" "${WORKDIR}/keys/admin"
+mkdir -p "${WORKDIR}/secrets" "${WORKDIR}/keys/backup" "${WORKDIR}/keys/admin" "${WORKDIR}/keys/manual"
 
 echo "=== Test-Keys erzeugen ==="
 ssh-keygen -q -t ed25519 -f "${WORKDIR}/secrets/ssh_host_ed25519_key" -C "" -N ""
@@ -72,6 +72,7 @@ CONTAINER=$(docker run -d \
     -v "${WORKDIR}/secrets/ssh_host_ed25519_key:/etc/ssh/ssh_host_ed25519_key:ro" \
     -v "${WORKDIR}/keys/backup:/keys/backup:ro" \
     -v "${WORKDIR}/keys/admin:/keys/admin:ro" \
+    -v "${WORKDIR}/keys/manual:/keys/manual:ro" \
     "${IMAGE}")
 
 PORT=$(docker port "${CONTAINER}" 22/tcp | head -n1 | cut -d: -f2)
@@ -180,6 +181,30 @@ if BORG_REPO="${LIVE_REPO}" BORG_RSH="${LIVE_RSH}" borg list >"${WORKDIR}/revoke
     exit 1
 fi
 echo "OK (Zugriff nach Entzug + Reload verweigert)"
+
+echo "=== Manueller Modus: keys/manual/authorized_keys übernimmt komplett, keys/backup/ wird ignoriert ==="
+ssh-keygen -q -t ed25519 -f "${WORKDIR}/manual_client" -C "manual-client" -N ""
+MANUAL_PUBKEY="$(cat "${WORKDIR}/manual_client.pub")"
+echo "command=\"borg serve --append-only --restrict-to-repository /data/manualtest\",restrict ${MANUAL_PUBKEY}" > "${WORKDIR}/keys/manual/authorized_keys"
+docker exec "${CONTAINER}" /usr/local/bin/build-authorized-keys.sh >/dev/null
+
+MANUAL_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/manual_client"
+MANUAL_REPO="ssh://borg@127.0.0.1:${PORT}/data/manualtest"
+BORG_REPO="${MANUAL_REPO}" BORG_RSH="${MANUAL_RSH}" borg init --encryption=repokey-blake2
+BORG_REPO="${MANUAL_REPO}" BORG_RSH="${MANUAL_RSH}" borg list
+echo "OK (manueller Key funktioniert)"
+
+if borg list >"${WORKDIR}/manual-mode-out" 2>&1; then
+    echo "FAIL: testclient-Key (aus keys/backup/) funktionierte noch, obwohl der manuelle Modus aktiv ist." >&2
+    cat "${WORKDIR}/manual-mode-out" >&2
+    exit 1
+fi
+echo "OK (keys/backup/ wird im manuellen Modus wirklich ignoriert)"
+
+rm "${WORKDIR}/keys/manual/authorized_keys"
+docker exec "${CONTAINER}" /usr/local/bin/build-authorized-keys.sh >/dev/null
+borg list >/dev/null
+echo "OK (zurück im generierten Modus: testclient-Key funktioniert wieder)"
 
 echo "=== Mehrere Borg-Versionen: Key mit <name>.version bekommt die richtige Binary ==="
 OLD_VERSION="1.2.8"
