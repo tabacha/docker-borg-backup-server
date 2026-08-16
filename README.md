@@ -117,6 +117,39 @@ frei — erst ein Aufruf mit dem Admin-Key kompaktiert wirklich (getestet in
 `.github/scripts/functional-test.sh`, das genau diesen Unterschied an der
 tatsächlichen Repo-Größe auf der Platte prüft, nicht nur am Exit-Code).
 
+### SSH-Härtung
+
+`sshd_config` schränkt die Kryptografie bewusst eng ein — dieser Server und
+der einzige erwartete Client (`docker-borg-backup`) laufen auf demselben
+Debian/OpenSSH-Unterbau, es muss also keine Rücksicht auf alte/fremde
+Clients genommen werden:
+
+- **Nur Ed25519** (`HostKeyAlgorithms`/`PubkeyAcceptedAlgorithms`) — alle
+  Skripte in beiden Repos erzeugen ausschließlich Ed25519-Schlüssel.
+  `sk-ssh-ed25519@openssh.com` ist zusätzlich erlaubt für FIDO2/Hardware-
+  Token-Admin-Keys (siehe `docker-borg-backup`'s README-Empfehlung, den
+  Admin-Key auf einem YubiKey zu halten) — `add-backup-key.sh`/
+  `add-admin-key.sh` prüfen den Key-Typ schon beim Registrieren und lehnen
+  z.B. versehentlich eingefügte RSA-Keys mit einer klaren Fehlermeldung ab,
+  statt sie erst beim Verbindungsversuch scheitern zu lassen.
+- **Kex:** ML-KEM-Hybrid zuerst (Post-Quantum, seit OpenSSH 9.9), Curve25519
+  als klassischer Fallback.
+- **Cipher:** absichtlich nur `chacha20-poly1305@openssh.com` — ein
+  AEAD-Cipher, kleinstmögliche Angriffsfläche, aber auch kein Fallback (siehe
+  Kommentar in `sshd_config`, falls das mal geändert werden soll).
+- **Kein fail2ban nötig:** OpenSSH bringt seit 9.8 mit `PerSourcePenalties`
+  einen eingebauten Schutz gegen wiederholte Auth-Fehler pro Quelle mit,
+  ganz ohne externen Daemon oder Firewall-Zugriff aus dem Container heraus.
+- Außerdem u.a. `LoginGraceTime 20`, `MaxAuthTries 3`, `MaxSessions 2`,
+  `Compression no`, `LogLevel VERBOSE` (protokolliert den Key-Fingerprint
+  pro Login — bei nur einem System-User `borg` sonst die einzige
+  Möglichkeit, Verbindungen im Log auseinanderzuhalten).
+
+Jede Zeile ist mit `sshd -t`/`sshd -T` gegen die tatsächlich im Image
+laufende OpenSSH-Version geprüft (nicht nur aus einer Anleitung übernommen)
+— wer die Liste erweitert (z.B. eine Fallback-Cipher), sollte das genauso
+verifizieren, bevor der Container damit deployed wird.
+
 ## Mehrere Clients
 
 Ein Server kann mehrere Backup-Hosts bedienen — einfach für jeden einen

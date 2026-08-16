@@ -26,6 +26,18 @@ if [[ ! "${NAME}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     exit 1
 fi
 
+# sshd_config akzeptiert nur ssh-ed25519/sk-ssh-ed25519@openssh.com
+# (siehe "Nur Ed25519" dort) - andere Key-Typen wuerden hier klaglos in
+# authorized_keys landen, aber erst beim tatsaechlichen Verbindungsversuch
+# mit einer wenig hilfreichen Fehlermeldung abgelehnt. Lieber jetzt schon
+# klar sagen, was das Problem ist.
+KEY_TYPE="$(awk '{print $1; exit}' "${PUBKEY_FILE}")"
+if [ "${KEY_TYPE}" != "ssh-ed25519" ] && [ "${KEY_TYPE}" != "sk-ssh-ed25519@openssh.com" ]; then
+    echo "ERROR: '${PUBKEY_FILE}' ist vom Typ '${KEY_TYPE}', dieser Server akzeptiert aber nur ssh-ed25519 oder" >&2
+    echo "sk-ssh-ed25519@openssh.com (FIDO2/Hardware-Token) - siehe sshd_config 'PubkeyAcceptedAlgorithms'." >&2
+    exit 1
+fi
+
 KEYS_DIR="${BASE_DIR}/keys/admin"
 mkdir -p "${KEYS_DIR}"
 
