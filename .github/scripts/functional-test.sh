@@ -209,9 +209,14 @@ BORG_REPO="${OLD_REPO}" BORG_RSH="${OLD_RSH}" borg init --encryption=repokey-bla
 BORG_REPO="${OLD_REPO}" BORG_RSH="${OLD_RSH}" borg create ::functional-test /work/testfile.txt
 BORG_REPO="${OLD_REPO}" BORG_RSH="${OLD_RSH}" borg list
 
-if ! docker logs "${CONTAINER}" 2>&1 | grep -qF "Backup-Key 'oldversion' -> /data/oldversion (append-only, borg-${OLD_VERSION})"; then
-    echo "FAIL: Log zeigt nicht, dass 'oldversion' wirklich borg-${OLD_VERSION} zugewiesen bekam." >&2
-    docker logs "${CONTAINER}" 2>&1 | tail -20 >&2
+# Direkt den tatsächlichen authorized_keys-Inhalt prüfen statt "docker logs"
+# zu grepen - Log-Ausgaben landen abhängig vom Log-Treiber/dessen Timing
+# nicht immer sofort vollständig in "docker logs" (in CI beobachtet), der
+# Dateiinhalt selbst ist dagegen deterministisch und ist ohnehin das, was
+# tatsächlich zählt.
+if ! docker exec "${CONTAINER}" grep -qF "borg-${OLD_VERSION} serve --append-only --restrict-to-repository /data/oldversion" /home/borg/.ssh/authorized_keys; then
+    echo "FAIL: authorized_keys zeigt nicht, dass 'oldversion' wirklich borg-${OLD_VERSION} zugewiesen bekam." >&2
+    docker exec "${CONTAINER}" cat /home/borg/.ssh/authorized_keys >&2
     exit 1
 fi
 echo "OK (Key 'oldversion' läuft über borg-${OLD_VERSION}, init/create/list funktionieren damit)"
