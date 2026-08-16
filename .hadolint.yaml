@@ -1,0 +1,4 @@
+ignored:
+  # Bewusst ungepinnt: soll bei jedem Rebuild die aktuellen Security-Patches
+  # aus Debian bekommen statt an eingefrorenen Paketversionen zu kleben.
+  - DL3008

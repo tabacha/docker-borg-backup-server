@@ -1,0 +1,33 @@
+# Minimal-Config fuer einen reinen Borg-Serve-Endpunkt. Kein interaktiver
+# Login fuer irgendeinen Key vorgesehen - siehe build-authorized-keys.sh,
+# das jeden Key mit einem Forced Command + "restrict" versieht.
+
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile /home/%u/.ssh/authorized_keys
+
+# Kein PAM: reine Pubkey-Auth, kein /etc/shadow-Passwort vorgesehen. Mit
+# PAM wuerde sshd zusaetzlich den Account-Status pruefen und einen frisch
+# angelegten User (der ohne -p ein gesperrtes Passwort hat) ablehnen.
+UsePAM no
+
+AllowUsers borg
+
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+PermitTunnel no
+GatewayPorts no
+PrintMotd no
+PrintLastLog no
+
+TCPKeepAlive yes
+ClientAliveInterval 60
+ClientAliveCountMax 3
+
+Subsystem sftp internal-sftp

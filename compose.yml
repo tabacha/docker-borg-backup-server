@@ -1,0 +1,21 @@
+services:
+  borg-server:
+    # Vorgebautes Image von GHCR - "docker compose pull" statt selbst
+    # bauen. "build: ." bleibt als Fallback (z.B. für lokale Änderungen
+    # am Dockerfile, oder falls die Registry nicht erreichbar ist).
+    image: ghcr.io/tabacha/docker-borg-backup-server:latest
+    build: .
+
+    restart: unless-stopped
+
+    ports:
+      - "${SSH_PORT:-2222}:22"
+
+    volumes:
+      - borg-data:/data
+      - ./secrets/ssh_host_ed25519_key:/etc/ssh/ssh_host_ed25519_key:ro
+      - ./keys/backup:/keys/backup:ro
+      - ./keys/admin:/keys/admin:ro
+
+volumes:
+  borg-data:
