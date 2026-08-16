@@ -196,7 +196,14 @@ abgewürgt (`docker compose restart` killt den Container-Prozess und damit
 jede offene `borg serve`-Session, nicht nur neue Verbindungsversuche).
 `reload-keys.sh` ruft stattdessen `build-authorized-keys.sh` per `docker
 compose exec` im laufenden Container erneut auf - kein Signal an `sshd`,
-kein Prozess-Neustart, nur die Datei wird aktualisiert.
+kein Prozess-Neustart, nur die Datei wird aktualisiert. `add-backup-key.sh`/
+`add-admin-key.sh` rufen `reload-keys.sh` am Ende selbst auf (kein manueller
+Schritt mehr fürs Hinzufügen nötig) - läuft der Container noch nicht (z.B.
+bei der Ersteinrichtung, vor dem ersten `docker compose up -d`), prüft
+`reload-keys.sh` das per `docker compose ps -q borg-server` vorher und
+druckt nur einen Hinweis statt eines Fehlers (der nächste reguläre Start
+baut `authorized_keys` ohnehin frisch). Für das *manuelle* Löschen einer
+`.pub`-Datei bleibt `reload-keys.sh` weiterhin ein eigener Aufruf.
 
 Deshalb schreibt `build-authorized-keys.sh` NICHT mehr direkt in
 `authorized_keys`, sondern über `mktemp` in eine Tmp-Datei im selben
@@ -211,6 +218,51 @@ Wichtig: das entfernt nur die Möglichkeit, sich NEU zu verbinden - eine
 bereits laufende Session des ausgetragenen Keys läuft weiter, bis sie von
 selbst endet. Ein hartes Kappen (Prozess im Container gezielt killen) deckt
 `reload-keys.sh` bewusst nicht ab.
+
+Beim Verdrahten von `reload-keys.sh` in `add-backup-key.sh`/`add-admin-key.sh`
+ist ein echter, vorher unbemerkter Bug aufgefallen: der Best-Effort-Check
+gegen `SSHD_PUBKEY_ALGORITHMS` liest den Wert per
+`grep ... "${BASE_DIR}/.env" | tail -n1 | cut -d= -f2-` in einer Command-
+Substitution. `SSHD_PUBKEY_ALGORITHMS` ist in `.env.example` standardmäßig
+AUSKOMMENTIERT - `grep` findet in der weit überwiegenden Mehrheit der Fälle
+also nichts und exitet mit 1. Unter `set -euo pipefail` bricht eine simple
+Zuweisung wie `ENV_VALUE="$(...)"` das ganze Skript ab, wenn die Pipeline
+darin (via `pipefail`) nicht-null exitet - selbst wenn das Nicht-Finden
+völlig erwartet ist. Fix: `|| true` ans Ende der Pipeline. War vorher nie
+aufgefallen, weil alle bisherigen manuellen Tests von `add-backup-key.sh`
+im echten Repo-Verzeichnis liefen, wo nie eine `.env`-Datei lag (das Skript
+übersprang den ganzen Block dann einfach via `[ -f "${BASE_DIR}/.env" ]`) -
+erst ein Test mit einer echten, aus `.env.example` kopierten `.env` deckte
+es auf. Lehre: Skripte, die `.env` lesen, mit einer echten (aus
+`.env.example` kopierten) `.env` testen, nicht ohne.
+
+### Manueller Modus (`keys/manual/authorized_keys`)
+
+Zweiter, expliziter Escape-Hatch neben der generierten `authorized_keys`:
+liegt `keys/manual/authorized_keys` vor (compose.yml mountet `keys/manual/`
+zusätzlich zu `keys/backup/`+`keys/admin/`), kopiert
+`build-authorized-keys.sh` diese Datei nur noch 1:1 (atomar, gleicher
+mktemp+mv-Mechanismus) und überspringt die gesamte Generierungslogik aus
+`keys/backup/*.pub`+`keys/admin/*.pub` komplett (`exit 0` direkt nach dem
+Kopieren). Kein Parsing/Validieren des Inhalts - wer diesen Modus nutzt,
+ist selbst für korrekte `command=`/`restrict`-Syntax verantwortlich.
+`add-backup-key.sh`/`add-admin-key.sh` prüfen `[ -s keys/manual/authorized_keys ]`
+und warnen, statt hart abzubrechen (der generierte Key landet trotzdem in
+`keys/backup/`/`keys/admin/` - falls der manuelle Modus später wieder
+verlassen wird, ist er dann schon da).
+
+**Warum kopieren statt `AuthorizedKeysFile` direkt auf den Mount zeigen
+lassen?** Naheliegende Alternative, die noch nicht mal den `reload-keys.sh`-
+Aufruf bräuchte (sshd liest ohnehin bei jeder Verbindung frisch) - empirisch
+geprüft und verworfen: `StrictModes` (aktiv) lehnt die gemountete Datei ab,
+weil sie dem UID des Host-Users gehört, der sie angelegt hat, nicht `root`
+oder `borg` im Container. Log-Beweis: "Authentication refused: bad
+ownership or modes for file /keys/manual/authorized_keys". Umgehen ginge
+nur mit `StrictModes no` (schwächt die Prüfung für ALLE authorized_keys-
+Dateien, nicht nur die manuelle) oder host-seitigem `chown` auf die
+Container-interne `borg`-UID (fragil, kann sich mit einem Image-Update
+ändern). Der Copy-Schritt übernimmt die Rechtekontrolle deshalb bewusst
+selbst, unabhängig von der Quell-Ownership.
 
 `SSHD_PUBKEY_ALGORITHMS`/`SSHD_KEX_ALGORITHMS`/`SSHD_CIPHERS`/`SSHD_MACS`
 (siehe Env-Overrides oben) sind davon UNABHÄNGIG - die werden nur beim

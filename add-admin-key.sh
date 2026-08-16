@@ -7,6 +7,11 @@
 # Zugriff (prune/delete/compact) auf jedes Repo unter /data, aber weiterhin
 # keine Shell und kein Ausbruch aus /data.
 #
+# Ruft am Ende automatisch reload-keys.sh auf, damit der Key sofort aktiv
+# wird - ohne den Container neu zu starten und ohne laufende Sessions
+# anderer Clients zu unterbrechen. Laeuft der Container noch nicht (z.B. bei
+# der Ersteinrichtung), ist das kein Fehler, siehe reload-keys.sh.
+#
 # Usage: ./add-admin-key.sh <name> <pubkey-datei> [borg-version]
 #
 # [borg-version] ist optional (z.B. "1.2.8") - siehe README "Mehrere
@@ -26,6 +31,12 @@ if [[ ! "${NAME}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     exit 1
 fi
 
+if [ -s "${BASE_DIR}/keys/manual/authorized_keys" ]; then
+    echo "WARNUNG: keys/manual/authorized_keys existiert - der manuelle Modus ist aktiv," >&2
+    echo "keys/admin/ wird dabei komplett ignoriert. Dieser Key wird erst wirksam, wenn" >&2
+    echo "keys/manual/authorized_keys entfernt wird (siehe README 'Manueller Modus')." >&2
+fi
+
 # Best-Effort-Check gegen SSHD_PUBKEY_ALGORITHMS (aus .env, sonst der
 # Default aus sshd_config.template) - nur eine Warnung, kein hartes
 # Abbrechen: bei RSA ist die Zuordnung nicht 1:1 (rsa-sha2-512/-256 sind
@@ -37,7 +48,11 @@ fi
 # Verbindungsversuch.
 PUBKEY_ALGORITHMS="ssh-ed25519,sk-ssh-ed25519@openssh.com"
 if [ -f "${BASE_DIR}/.env" ]; then
-    ENV_VALUE="$(grep -E '^SSHD_PUBKEY_ALGORITHMS=' "${BASE_DIR}/.env" | tail -n1 | cut -d= -f2-)"
+    # "|| true": grep findet in der weit ueberwiegenden Mehrheit der Faelle
+    # NICHTS (SSHD_PUBKEY_ALGORITHMS ist standardmaessig auskommentiert) -
+    # ohne "|| true" wuerde grep's Exit-Code 1 unter "set -euo pipefail"
+    # das ganze Skript an dieser Stelle abbrechen (Bug, real aufgetreten).
+    ENV_VALUE="$(grep -E '^SSHD_PUBKEY_ALGORITHMS=' "${BASE_DIR}/.env" | tail -n1 | cut -d= -f2- || true)"
     [ -n "${ENV_VALUE}" ] && PUBKEY_ALGORITHMS="${ENV_VALUE}"
 fi
 
@@ -74,7 +89,8 @@ if [ -n "${BORG_VERSION}" ]; then
 fi
 
 echo "Admin-Key '${NAME}' hinzugefuegt (keys/admin/${NAME}.pub)."
-echo "Aktivieren, ohne laufende Sessions anderer Clients zu unterbrechen: ./reload-keys.sh"
+echo
+"${BASE_DIR}/reload-keys.sh"
 echo
 echo "Dieser Key sollte NIE als Datei auf einem gesicherten Host liegen -"
 echo "nur im eigenen SSH-Agent des Admins (idealerweise Hardware-Token), siehe"
