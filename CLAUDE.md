@@ -182,9 +182,79 @@ Volume.
 
 `compose.yml` definiert nur den Service `borg-server`. `keys/backup/` und
 `keys/admin/` werden read-only in den Container gemountet;
-`build-authorized-keys.sh` baut daraus bei **jedem** Container-Start
-`authorized_keys` komplett neu — Key-Rotation heißt also: Datei unter
-`keys/` anlegen/löschen, `docker compose restart`.
+`build-authorized-keys.sh` baut daraus `authorized_keys` komplett neu — beim
+Container-Start (via `entrypoint.sh`) UND jederzeit erneut im laufenden
+Container (`reload-keys.sh`, siehe nächster Abschnitt).
+
+### `reload-keys.sh`: Key-Rotation ohne Container-Neustart
+
+`sshd` liest `authorized_keys` bei jeder neuen Verbindung frisch von der
+Platte (kein In-Memory-Cache über die Laufzeit des Daemons) - ein
+Container-Neustart war für einen Key-Reload nie technisch nötig, hätte aber
+jeden gerade laufenden Backup-Transfer eines ANDEREN Clients mitten drin
+abgewürgt (`docker compose restart` killt den Container-Prozess und damit
+jede offene `borg serve`-Session, nicht nur neue Verbindungsversuche).
+`reload-keys.sh` ruft stattdessen `build-authorized-keys.sh` per `docker
+compose exec` im laufenden Container erneut auf - kein Signal an `sshd`,
+kein Prozess-Neustart, nur die Datei wird aktualisiert.
+
+Deshalb schreibt `build-authorized-keys.sh` NICHT mehr direkt in
+`authorized_keys`, sondern über `mktemp` in eine Tmp-Datei im selben
+Verzeichnis + abschließendes `mv` (atomares `rename(2)`, da gleiches
+Dateisystem) - ohne das könnte eine zeitgleich eintreffende SSH-Verbindung
+mitten im Neuschreiben eine leere oder unvollständige Datei lesen. Ein
+`trap ... EXIT` räumt die Tmp-Datei auf, falls das Skript vorher abbricht
+(z.B. `resolve_borg_binary()` mit `exit 1` bei einer nicht installierten
+Borg-Version).
+
+Wichtig: das entfernt nur die Möglichkeit, sich NEU zu verbinden - eine
+bereits laufende Session des ausgetragenen Keys läuft weiter, bis sie von
+selbst endet. Ein hartes Kappen (Prozess im Container gezielt killen) deckt
+`reload-keys.sh` bewusst nicht ab.
+
+`SSHD_PUBKEY_ALGORITHMS`/`SSHD_KEX_ALGORITHMS`/`SSHD_CIPHERS`/`SSHD_MACS`
+(siehe Env-Overrides oben) sind davon UNABHÄNGIG - die werden nur beim
+Container-*Erstellen* gelesen, dafür bleibt `docker compose up -d` nötig,
+`reload-keys.sh`/`restart` reichen dafür nicht.
+
+### Zweistufiger Dockerfile-Build (Builder/Runtime getrennt)
+
+Motivation: Compiler/Header/pip-Cache sollen nicht im ausgelieferten Image
+landen (Angriffsfläche für "living off the land" nach einer Kompromittierung
+reduzieren). Ein Single-Stage-Image mit nachträglichem `apt-get purge` lässt
+sich nicht sauber davon befreien - `dpkg` verweigert, sich selbst zu
+entfernen, und gelöschte Dateien bleiben ohnehin in früheren Layern
+erhalten. Multi-Stage ist der korrekte Weg: nur was per `COPY --from=builder`
+explizit rübergeholt wird, landet im Endergebnis.
+
+- **Builder-Stage** (`FROM python:3.14-slim AS builder`): installiert
+  `build-essential`/`pkg-config`/die `-dev`-Header, baut pro `BORG_VERSIONS`-
+  Eintrag ein eigenes venv unter `/opt/borg-<version>`. Das venv-eigene
+  `python3`-Binary ist ein SYMLINK auf die Basis dieses Images (kein
+  `python3 -m venv --copies`) - funktioniert nur, weil die Runtime-Stage
+  exakt dieselbe Basis (`python:3.14-slim`, dieselbe Tag-Version) hat. Ein
+  Wechsel der Runtime-Stage auf eine andere Basis (z.B. `debian:trixie-slim`
+  ohne Python) würde die kopierten venvs kaputt machen, weil der
+  symlink-Zielpfad dann fehlt - deshalb bewusst NICHT gemacht, obwohl das
+  nochmal Platz sparen würde (siehe unten).
+- **Runtime-Stage** (`FROM python:3.14-slim`, frisch, keine Builder-Historie):
+  installiert nur `openssh-server` + die per `ldd` gegen die tatsächlich
+  gebauten `.so`-Extensions ermittelten Laufzeit-Bibliotheken (`libssl3t64`,
+  `libacl1`, `liblz4-1`, `libxxhash0`, `libzstd1`, `zlib1g`) - NICHT geraten,
+  sondern empirisch verifiziert (`find /opt -name '*.so' -exec ldd {} \;`).
+  `openssh-server` zieht `openssh-client` automatisch als Depends mit (auch
+  mit `--no-install-recommends`, das blendet nur Recommends/Suggests aus) -
+  wichtig, weil `entrypoint.sh` `ssh-keygen` daraus braucht.
+- **`apt`/`dpkg`/`perl-base`/`systemd` bleiben trotzdem im Image** - die sind
+  Teil der `python:3.14-slim`-Basis selbst (jedes Debian-basierte Image
+  braucht seinen eigenen Paketmanager), nicht etwas, das WIR zusätzlich
+  installiert haben. Sie ganz loszuwerden bräuchte eine komplett andere
+  (nicht-Debian-)Basis für die Runtime-Stage - dann bricht aber der
+  venv-Symlink-Mechanismus (s.o.), müsste also gegen ein `--copies`-venv
+  oder ein manuelles Kopieren der Python-Stdlib eingetauscht werden. Bewusst
+  nicht gemacht: deutlich größerer, riskanterer Schritt für vergleichsweise
+  wenig zusätzlichen Gewinn (gemessen: 220 MB -> 204 MB durch das
+  Entfernen von Compiler/Headern allein).
 
 ### CI/Release-Pipeline
 

@@ -2,8 +2,25 @@
 #
 # Baut /home/borg/.ssh/authorized_keys komplett neu aus /keys/backup/*.pub
 # und /keys/admin/*.pub. Laeuft bei jedem Container-Start (siehe
-# entrypoint.sh) - Keys hinzufuegen/entfernen heisst also nur: Datei unter
-# keys/ auf dem Host anlegen/loeschen, Container neu starten.
+# entrypoint.sh) UND kann jederzeit bei laufendem Container erneut
+# angestossen werden, um jemanden auszutragen, ohne einen laufenden Backup-
+# Transfer eines ANDEREN Clients zu unterbrechen (siehe reload-keys.sh):
+#
+#   docker compose exec -T borg-server /usr/local/bin/build-authorized-keys.sh
+#
+# sshd liest authorized_keys ohnehin bei JEDER Verbindung neu vom Datei-
+# system (kein In-Memory-Cache ueber die Laufzeit des Daemons) - ein Reload
+# heisst also nur "Datei aktualisieren", kein Signal an sshd noetig. Bereits
+# laufende Sessions (offene "borg serve"-Prozesse) sind davon nicht
+# betroffen, weil authorized_keys nur bei der Authentifizierung NEUER
+# Verbindungen gelesen wird - ein entfernter Key beendet also keine gerade
+# laufende Übertragung desselben oder eines anderen Clients, verhindert nur
+# neue Logins damit.
+#
+# Wegen des moeglichen Reloads bei laufendem Betrieb wird NICHT direkt in
+# authorized_keys geschrieben (siehe unten "atomar ersetzen") - sonst
+# koennte eine zeitgleich eintreffende SSH-Verbindung sshd mitten im
+# Neuschreiben eine leere oder unvollstaendige Datei lesen lassen.
 #
 # Backup-Keys bekommen ein Forced Command, das sie auf genau ein Repo unter
 # /data/<name> UND auf Append-Only einschraenkt (koennen schreiben, aber
@@ -33,7 +50,13 @@
 set -euo pipefail
 
 AUTHORIZED_KEYS="/home/borg/.ssh/authorized_keys"
+AUTHORIZED_KEYS_TMP="$(mktemp "${AUTHORIZED_KEYS}.XXXXXX")"
 DATA_DIR="/data"
+
+# Aufraeumen, falls das Skript vor dem abschliessenden "mv" abbricht (z.B.
+# resolve_borg_binary() weiter unten mit "exit 1") - sonst sammeln sich bei
+# wiederholten fehlgeschlagenen Reloads Tmp-Dateien im .ssh-Verzeichnis an.
+trap 'rm -f "${AUTHORIZED_KEYS_TMP}"' EXIT
 
 resolve_borg_binary() {
     local pubkey_file="$1"
@@ -58,8 +81,6 @@ resolve_borg_binary() {
     echo "${binary}"
 }
 
-: > "${AUTHORIZED_KEYS}"
-
 shopt -s nullglob
 
 for pubkey_file in /keys/backup/*.pub; do
@@ -69,7 +90,7 @@ for pubkey_file in /keys/backup/*.pub; do
     chown borg:borg "${repo_dir}"
     pubkey="$(cat "${pubkey_file}")"
     binary="$(resolve_borg_binary "${pubkey_file}")"
-    echo "command=\"${binary} serve --append-only --restrict-to-repository ${repo_dir}\",restrict ${pubkey}" >> "${AUTHORIZED_KEYS}"
+    echo "command=\"${binary} serve --append-only --restrict-to-repository ${repo_dir}\",restrict ${pubkey}" >> "${AUTHORIZED_KEYS_TMP}"
     echo "Backup-Key '${name}' -> ${repo_dir} (append-only, ${binary})"
 done
 
@@ -77,13 +98,19 @@ for pubkey_file in /keys/admin/*.pub; do
     name="$(basename "${pubkey_file}" .pub)"
     pubkey="$(cat "${pubkey_file}")"
     binary="$(resolve_borg_binary "${pubkey_file}")"
-    echo "command=\"${binary} serve --restrict-to-path ${DATA_DIR}\",restrict ${pubkey}" >> "${AUTHORIZED_KEYS}"
+    echo "command=\"${binary} serve --restrict-to-path ${DATA_DIR}\",restrict ${pubkey}" >> "${AUTHORIZED_KEYS_TMP}"
     echo "Admin-Key '${name}' -> voller Zugriff auf ${DATA_DIR} (${binary})"
 done
 
-if [ ! -s "${AUTHORIZED_KEYS}" ]; then
+if [ ! -s "${AUTHORIZED_KEYS_TMP}" ]; then
     echo "WARNUNG: keine Keys in keys/backup/ oder keys/admin/ gefunden - niemand kann sich verbinden." >&2
 fi
 
-chown borg:borg "${AUTHORIZED_KEYS}"
-chmod 600 "${AUTHORIZED_KEYS}"
+chown borg:borg "${AUTHORIZED_KEYS_TMP}"
+chmod 600 "${AUTHORIZED_KEYS_TMP}"
+
+# Atomar ersetzen (gleiches Verzeichnis/Dateisystem -> "mv" ist ein reines
+# rename(2), kein Kopieren) - sshd sieht die Datei nie in einem
+# Zwischenzustand, egal wann genau eine Verbindung waehrend eines Reloads
+# hereinkommt.
+mv "${AUTHORIZED_KEYS_TMP}" "${AUTHORIZED_KEYS}"

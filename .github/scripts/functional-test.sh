@@ -20,6 +20,9 @@
 #   - SSHD_PUBKEY_ALGORITHMS als Env-Override erlaubt wirklich einen
 #     zusätzlichen Key-Typ (RSA, z.B. für einen YubiKey über das
 #     PIV-Applet), der mit den Defaults abgelehnt würde.
+#   - Ein Key lässt sich hinzufügen UND entziehen, ohne den Container neu
+#     zu starten (reload-keys.sh-Mechanismus) - derselbe Port bleibt dabei
+#     erreichbar, es gibt keinen Restart.
 #
 # Aufruf:
 #   .github/scripts/functional-test.sh <image-ref>
@@ -153,6 +156,30 @@ if BORG_REPO="${OTHER_REPO}" borg list >"${WORKDIR}/other-repo-out" 2>&1; then
     exit 1
 fi
 echo "OK (Zugriff verweigert, obwohl /data/otherclient existiert)"
+
+echo "=== Live-Reload ohne Neustart: neuer Key wirkt sofort, alter Port bleibt ==="
+ssh-keygen -q -t ed25519 -f "${WORKDIR}/backup_client_live" -C "backup-client-live" -N ""
+cp "${WORKDIR}/backup_client_live.pub" "${WORKDIR}/keys/backup/liveclient.pub"
+# KEIN "docker restart" - genau das ist der Punkt von reload-keys.sh: die
+# Datei steht schon (Bind-Mount), nur authorized_keys im laufenden
+# Container muss aktualisiert werden.
+docker exec "${CONTAINER}" /usr/local/bin/build-authorized-keys.sh >/dev/null
+
+LIVE_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/backup_client_live"
+LIVE_REPO="ssh://borg@127.0.0.1:${PORT}/data/liveclient"
+BORG_REPO="${LIVE_REPO}" BORG_RSH="${LIVE_RSH}" borg init --encryption=repokey-blake2
+BORG_REPO="${LIVE_REPO}" BORG_RSH="${LIVE_RSH}" borg list
+echo "OK (neuer Key ohne Neustart nutzbar, weiterhin auf Port ${PORT})"
+
+echo "=== ... und Entzug wirkt genauso ohne Neustart ==="
+rm "${WORKDIR}/keys/backup/liveclient.pub"
+docker exec "${CONTAINER}" /usr/local/bin/build-authorized-keys.sh >/dev/null
+if BORG_REPO="${LIVE_REPO}" BORG_RSH="${LIVE_RSH}" borg list >"${WORKDIR}/revoked-out" 2>&1; then
+    echo "FAIL: liveclient-Key konnte sich nach dem Entfernen + Reload noch verbinden." >&2
+    cat "${WORKDIR}/revoked-out" >&2
+    exit 1
+fi
+echo "OK (Zugriff nach Entzug + Reload verweigert)"
 
 echo "=== Mehrere Borg-Versionen: Key mit <name>.version bekommt die richtige Binary ==="
 OLD_VERSION="1.2.8"

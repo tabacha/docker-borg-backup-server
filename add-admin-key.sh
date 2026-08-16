@@ -32,7 +32,7 @@ fi
 # SIGNATUR-Algorithmen fuer den Key-TYP "ssh-rsa", tauchen also nie
 # woertlich in einer .pub-Datei auf, z.B. bei einem RSA-YubiKey ueber das
 # PIV-Applet), ein perfekter Check waere mehr Komplexitaet als er wert ist.
-# Ziel ist nur, den haeufigsten Fehler VOR dem "docker compose restart"
+# Ziel ist nur, den haeufigsten Fehler VOR dem naechsten ./reload-keys.sh
 # sichtbar zu machen statt erst beim naechsten fehlschlagenden
 # Verbindungsversuch.
 PUBKEY_ALGORITHMS="ssh-ed25519,sk-ssh-ed25519@openssh.com"
@@ -74,7 +74,7 @@ if [ -n "${BORG_VERSION}" ]; then
 fi
 
 echo "Admin-Key '${NAME}' hinzugefuegt (keys/admin/${NAME}.pub)."
-echo "Container neu starten, damit er aktiv wird: docker compose restart"
+echo "Aktivieren, ohne laufende Sessions anderer Clients zu unterbrechen: ./reload-keys.sh"
 echo
 echo "Dieser Key sollte NIE als Datei auf einem gesicherten Host liegen -"
 echo "nur im eigenen SSH-Agent des Admins (idealerweise Hardware-Token), siehe"

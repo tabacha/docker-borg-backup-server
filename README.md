@@ -28,15 +28,16 @@ Client-Seite (siehe `docker-borg-backup`).
 
 | Pfad                      | Zweck                                                              |
 |-----------------------------|--------------------------------------------------------------------|
-| `Dockerfile`                | Baut das Image: `openssh-server` + Borg (Client *und* Server-Teil, `borg serve` braucht denselben Binary). |
-| `sshd_config`                | Minimal-Config: nur Pubkey-Auth, kein PAM, kein Shell-Zugriff für irgendeinen User. |
+| `Dockerfile`                | Zweistufiger Build: Builder-Stage kompiliert Borg in venvs, Runtime-Stage (`openssh-server` + nur Laufzeit-Bibliotheken) enthält keinen Compiler/Header mehr. |
+| `sshd_config.template`       | Minimal-Config: nur Pubkey-Auth, kein PAM, kein Shell-Zugriff für irgendeinen User. Krypto-Platzhalter, siehe "SSH-Härtung". |
 | `compose.yml`                | Ein Service `borg-server`. Image kommt vorgebaut von GHCR, `build: .` ist Fallback. |
-| `entrypoint.sh`              | Baut beim Start `authorized_keys` neu, leitet den Hostkey-Public-Part ab, startet `sshd`. |
-| `build-authorized-keys.sh`   | Erzeugt `authorized_keys` aus `keys/backup/*.pub` + `keys/admin/*.pub`, je mit passendem Forced Command. |
+| `entrypoint.sh`              | Rendert `sshd_config` aus dem Template, baut beim Start `authorized_keys`, leitet den Hostkey-Public-Part ab, startet `sshd`. |
+| `build-authorized-keys.sh`   | Erzeugt `authorized_keys` aus `keys/backup/*.pub` + `keys/admin/*.pub`, je mit passendem Forced Command. Läuft beim Start UND bei Bedarf erneut im laufenden Container, siehe `reload-keys.sh`. |
 | `setup-secrets.sh`           | Erzeugt einmalig `secrets/ssh_host_ed25519_key` (idempotent). |
 | `add-backup-key.sh`          | Registriert einen neuen Backup-Client: `./add-backup-key.sh <name> <pubkey-datei>`. |
 | `add-admin-key.sh`           | Registriert einen neuen Admin-Key: `./add-admin-key.sh <name> <pubkey-datei>`. |
-| `.env` / `.env.example`      | Nur `SSH_PORT`. |
+| `reload-keys.sh`             | Baut `authorized_keys` im laufenden Container neu, ohne Neustart — unterbricht keine laufenden Sessions anderer Clients. |
+| `.env` / `.env.example`      | `SSH_PORT`, optionale `SSHD_*`-Krypto-Overrides. |
 | `secrets/`                   | SSH-Hostkey dieses Servers. Pro Deployment eigen, nicht committen. |
 | `keys/backup/`, `keys/admin/`| Public Keys der Clients/Admins. Pro Deployment eigen, nicht committen. |
 | `DEVELOPMENT.md`             | Für Mitarbeit am Repo selbst: lokale Checks, CI/Release-Pipeline. |
@@ -95,8 +96,10 @@ Client-Seite (siehe `docker-borg-backup`).
    ```
 
    Jeder weitere `add-backup-key.sh`/`add-admin-key.sh`-Aufruf braucht danach
-   nur noch `docker compose restart`, damit `authorized_keys` neu gebaut
-   wird.
+   nur noch `./reload-keys.sh`, damit `authorized_keys` neu gebaut wird —
+   **ohne** den Container neu zu starten (wichtig, wenn gerade ein
+   laufender Backup-Transfer eines anderen Clients nicht unterbrochen
+   werden soll, siehe "Key-Rotation/-Entzug" unten).
 
 ## Sicherheitsmodell
 
@@ -224,6 +227,31 @@ Installierte Versionen in einem laufenden Container auflisten:
 docker compose exec borg-server sh -c 'ls /usr/local/bin/borg-*'
 ```
 
+## Key-Rotation/-Entzug ohne Unterbrechung laufender Sessions
+
+Datei unter `keys/backup/` bzw. `keys/admin/` anlegen/löschen/ersetzen, dann:
+
+```bash
+./reload-keys.sh
+```
+
+Baut `authorized_keys` **im laufenden Container** neu, ganz ohne Neustart.
+Das ist der Grund, warum es das Skript gibt: `sshd` liest `authorized_keys`
+ohnehin bei jeder neuen Verbindung frisch von der Platte (kein
+In-Memory-Cache über die Laufzeit des Daemons) — ein `docker compose
+restart` war für diesen Zweck also nie nötig, hätte aber jeden gerade
+laufenden Backup-Transfer eines *anderen*, weiterhin berechtigten Clients
+mitten drin abgewürgt. `reload-keys.sh` betrifft nur *neue*
+Verbindungsversuche; ein bereits laufender Transfer des soeben ausgetragenen
+Clients läuft noch zu Ende (kein Kill bestehender Sessions) — für ein
+sofortiges hartes Kappen müsste man den zugehörigen Prozess im Container
+gezielt beenden, das deckt dieses Skript bewusst nicht ab.
+
+`build-authorized-keys.sh` schreibt dafür in eine temporäre Datei und
+ersetzt `authorized_keys` erst danach atomar (`mv` im selben Verzeichnis) —
+sonst könnte eine zeitgleich eintreffende Verbindung mitten im Neuschreiben
+eine leere Datei zu sehen bekommen.
+
 ## Sonstiges
 
 - **`/data`** ist ein normales (nicht `external:`) Compose-Volume — dieses
@@ -232,9 +260,18 @@ docker compose exec borg-server sh -c 'ls /usr/local/bin/borg-*'
 - **FUSE (`borg mount`)** ist hier nicht relevant — das läuft ausschließlich
   clientseitig in `docker-borg-backup`, dieser Server spricht nur das
   Borg-Serve-Protokoll.
-- **Key-Rotation/-Entzug:** Datei unter `keys/backup/` bzw. `keys/admin/`
-  löschen oder ersetzen, dann `docker compose restart` — `authorized_keys`
-  wird bei jedem Start komplett neu gebaut.
+- **Schlankes Image:** `Dockerfile` baut zweistufig — eine Builder-Stage mit
+  Compiler/Headern (nur dort, für die Borg-C-Extensions nötig) und eine
+  Runtime-Stage, die nur noch `openssh-server` plus die tatsächlich per
+  `ldd` ermittelten Laufzeit-Bibliotheken (`libacl1`, `libssl3t64`,
+  `liblz4-1`, `libxxhash0`, `libzstd1`, `zlib1g`) bekommt. Kein
+  Compiler/Header/pip-Cache im ausgelieferten Image. `apt`/`dpkg` selbst
+  bleiben trotzdem drin — die sind Teil der `python:3.14-slim`-Basis (jedes
+  Debian-basierte Image braucht seinen eigenen Paketmanager, um überhaupt
+  etwas installieren zu können) und ließen sich nur durch einen Wechsel auf
+  eine komplett andere (nicht-Debian-)Basis entfernen — bewusst nicht
+  gemacht, das wäre ein größerer, riskanterer Schritt für vergleichsweise
+  wenig zusätzlichen Gewinn.
 
 Willst du am Repo selbst mitarbeiten (Skripte ändern, CI/Release-Pipeline)?
 Siehe [DEVELOPMENT.md](DEVELOPMENT.md).
