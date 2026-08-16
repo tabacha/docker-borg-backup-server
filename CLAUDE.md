@@ -46,40 +46,67 @@ Wichtige, beim Debuggen schon aufgetretene Stolperfallen:
 
 ## Architecture
 
-### SSH-Kryptografie eng eingeschränkt, empirisch verifiziert
+### SSH-Kryptografie eng eingeschränkt, per Env überschreibbar, empirisch verifiziert
 
-`sshd_config` erlaubt nur Ed25519 (`HostKeyAlgorithms`/
-`PubkeyAcceptedAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com` - Letzteres
+`sshd_config.template` ist kein fertiges Config-File, sondern hat vier
+Platzhalter (`__PUBKEY_ALGORITHMS__`, `__KEX_ALGORITHMS__`, `__CIPHERS__`,
+`__MACS__`), die `entrypoint.sh` bei jedem Container-Start per `sed` durch
+`SSHD_PUBKEY_ALGORITHMS`/`SSHD_KEX_ALGORITHMS`/`SSHD_CIPHERS`/`SSHD_MACS`
+(Env, Default falls unset) ersetzt und als `/etc/ssh/sshd_config`
+rausschreibt - direkt danach `sshd -t`, damit ein Tippfehler in einem
+Override den Start klar abbricht statt den Container kaputt hochzufahren.
+`HostKeyAlgorithms` bleibt dagegen hart auf `ssh-ed25519` (nicht per Env
+konfigurierbar) - das betrifft den eigenen Hostkey dieses Servers, der
+immer Ed25519 ist (`setup-secrets.sh`), unabhängig davon, welche Client-Key-
+Typen akzeptiert werden.
+
+Defaults: nur Ed25519 (`ssh-ed25519,sk-ssh-ed25519@openssh.com` - Letzteres
 für FIDO2-Admin-Keys, siehe `docker-borg-backup`-README-Empfehlung), Kex nur
-`mlkem768x25519-sha256,curve25519-sha256`, und genau EINEN Cipher
+`mlkem768x25519-sha256,curve25519-sha256`, und genau EIN Cipher
 (`chacha20-poly1305@openssh.com`, bewusst ohne Fallback - siehe Kommentar in
-`sshd_config`). Das ist vertretbar, weil dieser Server und der einzige
+`sshd_config.template`). Vertretbar eng, weil dieser Server und der einzige
 erwartete Client (`docker-borg-backup`) auf demselben Debian/OpenSSH-Unterbau
-laufen - es muss keine Rücksicht auf alte/fremde Clients genommen werden.
+laufen. `SSHD_PUBKEY_ALGORITHMS` existiert als Override primär für einen
+RSA-YubiKey (PIV-Applet statt FIDO2) als Admin-Key - der taucht als
+Key-TYP `ssh-rsa` auf, akzeptiert werden muss aber die SIGNATUR-Algorithmen
+`rsa-sha2-512`/`rsa-sha2-256` (nicht 1:1 zum Key-Typ-String, siehe unten).
 
-Wichtig beim Ändern dieser Liste: Nicht aus einer Anleitung übernehmen ohne
-gegenzuprüfen, dass die konkret im Image laufende OpenSSH-Version die
-Direktive überhaupt kennt - sonst startet `sshd` gar nicht mehr. Verifizieren
-mit (Host-Key-Datei nötig, sonst bricht `sshd -T` vorher mit "no hostkeys
-available" ab):
+Wichtig beim Ändern der Defaults im Template: Nicht aus einer Anleitung
+übernehmen ohne gegenzuprüfen, dass die konkret im Image laufende
+OpenSSH-Version die Direktive überhaupt kennt - sonst startet `sshd` gar
+nicht mehr. Verifizieren mit (Host-Key-Datei nötig, sonst bricht `sshd -T`
+vorher mit "no hostkeys available" ab):
 
 ```bash
 docker run --rm --entrypoint sh <image> -c '
   ssh-keygen -q -t ed25519 -f /tmp/k -N ""
-  sshd -t -f sshd_config -o HostKey=/tmp/k   # oder: sshd -T -o HostKey=/tmp/k
+  sshd -t -f /etc/ssh/sshd_config -o HostKey=/tmp/k   # oder: sshd -T -o HostKey=/tmp/k
 '
 ```
 
 `add-backup-key.sh`/`add-admin-key.sh` prüfen den Key-Typ beim Registrieren
-(erstes Feld der `.pub`-Datei) gegen dieselbe erlaubte Liste - ohne das würde
-z.B. ein versehentlich eingefügter RSA-Key klaglos in `authorized_keys`
-landen und erst beim tatsächlichen Verbindungsversuch mit einer wenig
-hilfreichen Fehlermeldung scheitern.
+(erstes Feld der `.pub`-Datei) gegen `SSHD_PUBKEY_ALGORITHMS` aus der
+lokalen `.env` (Fallback: derselbe Default wie oben) - nur eine WARNUNG,
+kein Abbruch, weil die Zuordnung Algorithmus↔Key-Typ bei RSA nicht 1:1 ist
+(s.o.) und ein perfekter Check mehr Komplexität wäre als er wert ist. Ziel
+ist nur, den häufigsten Fehler (z.B. ein RSA-Key ohne passenden
+`SSHD_PUBKEY_ALGORITHMS`-Override) vor dem Neustart sichtbar zu machen.
 
 Kein fail2ban: OpenSSH 9.8+ (dieses Image: 10.0p2) bringt mit
 `PerSourcePenalties` einen äquivalenten, in `sshd` eingebauten Schutz gegen
 wiederholte Auth-Fehler pro Quelle mit - kein externer Daemon, keine
 Firewall-Capabilities im Container nötig.
+
+### Env-Overrides brauchen Recreate, nicht nur Restart
+
+`SSHD_*`-Variablen werden beim Container-Erstellen fixiert (Docker-Env ist
+kein Live-Reload) - nach einer `.env`-Änderung braucht es `docker compose up
+-d` (Compose erkennt die geänderte Konfiguration und recreated den
+Container), ein reines `docker compose restart` reicht dafür NICHT. Für
+Key-Änderungen (`keys/backup/`, `keys/admin/`) reicht `restart` dagegen aus,
+weil die als Bind-Mount kommen und bei jedem Start neu von
+`build-authorized-keys.sh` eingelesen werden - zwei Mechanismen, zwei
+unterschiedliche "wie wende ich das an"-Antworten, nicht verwechseln.
 
 ### Kein Shell-Zugriff, für niemanden
 

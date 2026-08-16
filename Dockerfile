@@ -67,7 +67,7 @@ RUN useradd --create-home --shell /bin/bash borg \
  && chmod 700 /home/borg/.ssh \
  && chown borg:borg /home/borg/.ssh /data
 
-COPY sshd_config /etc/ssh/sshd_config
+COPY sshd_config.template /etc/ssh/sshd_config.template
 COPY build-authorized-keys.sh /usr/local/bin/build-authorized-keys.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/build-authorized-keys.sh /usr/local/bin/entrypoint.sh

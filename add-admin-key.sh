@@ -26,16 +26,37 @@ if [[ ! "${NAME}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     exit 1
 fi
 
-# sshd_config akzeptiert nur ssh-ed25519/sk-ssh-ed25519@openssh.com
-# (siehe "Nur Ed25519" dort) - andere Key-Typen wuerden hier klaglos in
-# authorized_keys landen, aber erst beim tatsaechlichen Verbindungsversuch
-# mit einer wenig hilfreichen Fehlermeldung abgelehnt. Lieber jetzt schon
-# klar sagen, was das Problem ist.
+# Best-Effort-Check gegen SSHD_PUBKEY_ALGORITHMS (aus .env, sonst der
+# Default aus sshd_config.template) - nur eine Warnung, kein hartes
+# Abbrechen: bei RSA ist die Zuordnung nicht 1:1 (rsa-sha2-512/-256 sind
+# SIGNATUR-Algorithmen fuer den Key-TYP "ssh-rsa", tauchen also nie
+# woertlich in einer .pub-Datei auf, z.B. bei einem RSA-YubiKey ueber das
+# PIV-Applet), ein perfekter Check waere mehr Komplexitaet als er wert ist.
+# Ziel ist nur, den haeufigsten Fehler VOR dem "docker compose restart"
+# sichtbar zu machen statt erst beim naechsten fehlschlagenden
+# Verbindungsversuch.
+PUBKEY_ALGORITHMS="ssh-ed25519,sk-ssh-ed25519@openssh.com"
+if [ -f "${BASE_DIR}/.env" ]; then
+    ENV_VALUE="$(grep -E '^SSHD_PUBKEY_ALGORITHMS=' "${BASE_DIR}/.env" | tail -n1 | cut -d= -f2-)"
+    [ -n "${ENV_VALUE}" ] && PUBKEY_ALGORITHMS="${ENV_VALUE}"
+fi
+
 KEY_TYPE="$(awk '{print $1; exit}' "${PUBKEY_FILE}")"
-if [ "${KEY_TYPE}" != "ssh-ed25519" ] && [ "${KEY_TYPE}" != "sk-ssh-ed25519@openssh.com" ]; then
-    echo "ERROR: '${PUBKEY_FILE}' ist vom Typ '${KEY_TYPE}', dieser Server akzeptiert aber nur ssh-ed25519 oder" >&2
-    echo "sk-ssh-ed25519@openssh.com (FIDO2/Hardware-Token) - siehe sshd_config 'PubkeyAcceptedAlgorithms'." >&2
-    exit 1
+ACCEPTED=0
+case ",${PUBKEY_ALGORITHMS}," in
+    *",${KEY_TYPE},"*) ACCEPTED=1 ;;
+esac
+if [ "${KEY_TYPE}" = "ssh-rsa" ]; then
+    case ",${PUBKEY_ALGORITHMS}," in
+        *",rsa-sha2-512,"*|*",rsa-sha2-256,"*) ACCEPTED=1 ;;
+    esac
+fi
+
+if [ "${ACCEPTED}" -eq 0 ]; then
+    echo "WARNUNG: '${PUBKEY_FILE}' ist vom Typ '${KEY_TYPE}', taucht aber nicht erkennbar in" >&2
+    echo "SSHD_PUBKEY_ALGORITHMS='${PUBKEY_ALGORITHMS}' auf - die Verbindung koennte mit" >&2
+    echo "'Permission denied (publickey)' scheitern. Siehe README 'SSH-Haertung', ggf." >&2
+    echo "SSHD_PUBKEY_ALGORITHMS in der .env anpassen." >&2
 fi
 
 KEYS_DIR="${BASE_DIR}/keys/admin"

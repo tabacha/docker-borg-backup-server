@@ -119,24 +119,44 @@ tatsächlichen Repo-Größe auf der Platte prüft, nicht nur am Exit-Code).
 
 ### SSH-Härtung
 
-`sshd_config` schränkt die Kryptografie bewusst eng ein — dieser Server und
-der einzige erwartete Client (`docker-borg-backup`) laufen auf demselben
-Debian/OpenSSH-Unterbau, es muss also keine Rücksicht auf alte/fremde
-Clients genommen werden:
+`sshd_config.template` schränkt die Kryptografie in den Defaults bewusst eng
+ein — dieser Server und der einzige erwartete Client (`docker-borg-backup`)
+laufen auf demselben Debian/OpenSSH-Unterbau, es muss also keine Rücksicht
+auf alte/fremde Clients genommen werden. `entrypoint.sh` rendert daraus bei
+jedem Container-Start das echte `/etc/ssh/sshd_config` und lässt vier Werte
+per Env überschreiben (`.env`, siehe `.env.example`):
 
-- **Nur Ed25519** (`HostKeyAlgorithms`/`PubkeyAcceptedAlgorithms`) — alle
-  Skripte in beiden Repos erzeugen ausschließlich Ed25519-Schlüssel.
-  `sk-ssh-ed25519@openssh.com` ist zusätzlich erlaubt für FIDO2/Hardware-
-  Token-Admin-Keys (siehe `docker-borg-backup`'s README-Empfehlung, den
-  Admin-Key auf einem YubiKey zu halten) — `add-backup-key.sh`/
-  `add-admin-key.sh` prüfen den Key-Typ schon beim Registrieren und lehnen
-  z.B. versehentlich eingefügte RSA-Keys mit einer klaren Fehlermeldung ab,
-  statt sie erst beim Verbindungsversuch scheitern zu lassen.
+| Env-Variable | Default | Bedeutung |
+|---|---|---|
+| `SSHD_PUBKEY_ALGORITHMS` | `ssh-ed25519,sk-ssh-ed25519@openssh.com` | Welche Client-Key-Typen akzeptiert werden. |
+| `SSHD_KEX_ALGORITHMS` | `mlkem768x25519-sha256,curve25519-sha256` | Key-Exchange. |
+| `SSHD_CIPHERS` | `chacha20-poly1305@openssh.com` | Verschlüsselung. |
+| `SSHD_MACS` | `hmac-sha2-256-etm@openssh.com` | Nur relevant, falls `SSHD_CIPHERS` um eine Nicht-AEAD-Cipher erweitert wird. |
+
+- **Nur Ed25519 in den Defaults** — alle Skripte in beiden Repos erzeugen
+  ausschließlich Ed25519-Schlüssel. `sk-ssh-ed25519@openssh.com` ist
+  zusätzlich erlaubt für FIDO2/Hardware-Token-Admin-Keys (siehe
+  `docker-borg-backup`'s README-Empfehlung, den Admin-Key auf einem YubiKey
+  zu halten).
+- **RSA-YubiKey (PIV-Applet statt FIDO2) zulassen:** ein solcher Key taucht
+  als normaler `ssh-rsa`-Typ auf, authentisiert aber über die moderneren
+  SHA2-Signaturvarianten — dafür `SSHD_PUBKEY_ALGORITHMS` in der `.env` um
+  `rsa-sha2-512,rsa-sha2-256` erweitern:
+  ```bash
+  SSHD_PUBKEY_ALGORITHMS=ssh-ed25519,sk-ssh-ed25519@openssh.com,rsa-sha2-512,rsa-sha2-256
+  ```
+  Danach `docker compose up -d` (Env-Änderungen brauchen einen echten
+  Neustart, nicht nur `restart`, da Compose sonst ggf. die alte Umgebung
+  weiterverwendet). Bewusst NICHT das legacy `ssh-rsa` (SHA1-Signatur aus
+  alten OpenSSH-Zeiten) — nur die SHA2-Varianten.
+  `add-backup-key.sh`/`add-admin-key.sh` prüfen beim Registrieren
+  informativ (Warnung, kein Abbruch — die Zuordnung Algorithmus↔Key-Typ ist
+  bei RSA nicht 1:1) gegen `SSHD_PUBKEY_ALGORITHMS` aus der `.env`.
 - **Kex:** ML-KEM-Hybrid zuerst (Post-Quantum, seit OpenSSH 9.9), Curve25519
   als klassischer Fallback.
-- **Cipher:** absichtlich nur `chacha20-poly1305@openssh.com` — ein
+- **Cipher:** Default absichtlich nur `chacha20-poly1305@openssh.com` — ein
   AEAD-Cipher, kleinstmögliche Angriffsfläche, aber auch kein Fallback (siehe
-  Kommentar in `sshd_config`, falls das mal geändert werden soll).
+  Kommentar in `sshd_config.template`, falls das mal geändert werden soll).
 - **Kein fail2ban nötig:** OpenSSH bringt seit 9.8 mit `PerSourcePenalties`
   einen eingebauten Schutz gegen wiederholte Auth-Fehler pro Quelle mit,
   ganz ohne externen Daemon oder Firewall-Zugriff aus dem Container heraus.
@@ -147,8 +167,10 @@ Clients genommen werden:
 
 Jede Zeile ist mit `sshd -t`/`sshd -T` gegen die tatsächlich im Image
 laufende OpenSSH-Version geprüft (nicht nur aus einer Anleitung übernommen)
-— wer die Liste erweitert (z.B. eine Fallback-Cipher), sollte das genauso
-verifizieren, bevor der Container damit deployed wird.
+— wer einen Override setzt oder die Defaults ändert, sollte das genauso
+verifizieren, bevor der Container damit deployed wird (`entrypoint.sh` ruft
+`sshd -t` selbst schon beim Start auf und bricht bei einem ungültigen Wert
+klar ab, statt den Container in einem kaputten Zustand hochzufahren).
 
 ## Mehrere Clients
 

@@ -17,6 +17,9 @@
 #   - Admin-Key darf compacten (restrict-to-path erlaubt Unterverzeichnisse).
 #   - Ein Key mit eigener <name>.version-Datei benutzt wirklich die dort
 #     angegebene Borg-Version (nicht die Default-Version des Images).
+#   - SSHD_PUBKEY_ALGORITHMS als Env-Override erlaubt wirklich einen
+#     zusätzlichen Key-Typ (RSA, z.B. für einen YubiKey über das
+#     PIV-Applet), der mit den Defaults abgelehnt würde.
 #
 # Aufruf:
 #   .github/scripts/functional-test.sh <image-ref>
@@ -32,10 +35,14 @@ IMAGE="${1:?Usage: functional-test.sh <image-ref>}"
 
 WORKDIR="$(mktemp -d)"
 CONTAINER=""
+CONTAINER2=""
 
 cleanup() {
     if [ -n "${CONTAINER}" ]; then
         docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${CONTAINER2}" ]; then
+        docker rm -f "${CONTAINER2}" >/dev/null 2>&1 || true
     fi
     rm -rf "${WORKDIR}"
 }
@@ -201,6 +208,33 @@ if [ "${SIZE_AFTER_ADMIN_COMPACT}" -ge "${SIZE_AFTER_BACKUP_COMPACT}" ]; then
     exit 1
 fi
 echo "OK (Repo geschrumpft: ${SIZE_AFTER_BACKUP_COMPACT}K -> ${SIZE_AFTER_ADMIN_COMPACT}K)"
+
+echo "=== SSHD_PUBKEY_ALGORITHMS-Override: RSA-Key (z.B. YubiKey/PIV) zusätzlich erlauben ==="
+ssh-keygen -q -t rsa -b 3072 -f "${WORKDIR}/admin_rsa" -C "admin-rsa" -N ""
+mkdir -p "${WORKDIR}/keys2/backup" "${WORKDIR}/keys2/admin"
+cp "${WORKDIR}/admin_rsa.pub" "${WORKDIR}/keys2/admin/rsaadmin.pub"
+
+CONTAINER2=$(docker run -d \
+    -p 127.0.0.1::22 \
+    -e SSHD_PUBKEY_ALGORITHMS="ssh-ed25519,sk-ssh-ed25519@openssh.com,rsa-sha2-512,rsa-sha2-256" \
+    -v "${WORKDIR}/secrets/ssh_host_ed25519_key:/etc/ssh/ssh_host_ed25519_key:ro" \
+    -v "${WORKDIR}/keys2/backup:/keys/backup:ro" \
+    -v "${WORKDIR}/keys2/admin:/keys/admin:ro" \
+    "${IMAGE}")
+PORT2=$(docker port "${CONTAINER2}" 22/tcp | head -n1 | cut -d: -f2)
+for _ in $(seq 1 30); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/${PORT2}") 2>/dev/null; then
+        exec 3>&- 3<&-
+        break
+    fi
+    sleep 1
+done
+
+RSA_RSH="ssh -p ${PORT2} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -o IdentitiesOnly=yes -i /work/admin_rsa"
+BORG_REPO="ssh://borg@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSA_RSH}" borg init --encryption=repokey-blake2
+BORG_REPO="ssh://borg@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSA_RSH}" borg create ::functional-test /work/testfile.txt
+BORG_REPO="ssh://borg@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSA_RSH}" borg list
+echo "OK (RSA-Key konnte sich per Env-Override authentifizieren und init/create/list ausführen)"
 
 echo
 echo "Funktionstest erfolgreich: ${IMAGE}"

@@ -11,6 +11,14 @@ services:
     ports:
       - "${SSH_PORT:-2222}:22"
 
+    environment:
+      # Alle vier optional - unbelegt kommen die engen Defaults aus
+      # sshd_config.template zum Einsatz. Siehe README "SSH-Haertung".
+      SSHD_PUBKEY_ALGORITHMS: "${SSHD_PUBKEY_ALGORITHMS:-}"
+      SSHD_KEX_ALGORITHMS: "${SSHD_KEX_ALGORITHMS:-}"
+      SSHD_CIPHERS: "${SSHD_CIPHERS:-}"
+      SSHD_MACS: "${SSHD_MACS:-}"
+
     volumes:
       - borg-data:/data
       - ./secrets/ssh_host_ed25519_key:/etc/ssh/ssh_host_ed25519_key:ro
