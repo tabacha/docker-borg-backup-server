@@ -15,6 +15,8 @@
 #   - Backup-Key bekommt KEINE Shell (Forced Command überschreibt jedes
 #     angeforderte Kommando).
 #   - Admin-Key darf compacten (restrict-to-path erlaubt Unterverzeichnisse).
+#   - Ein Key mit eigener <name>.version-Datei benutzt wirklich die dort
+#     angegebene Borg-Version (nicht die Default-Version des Images).
 #
 # Aufruf:
 #   .github/scripts/functional-test.sh <image-ref>
@@ -64,14 +66,20 @@ CONTAINER=$(docker run -d \
 
 PORT=$(docker port "${CONTAINER}" 22/tcp | head -n1 | cut -d: -f2)
 
+wait_for_sshd() {
+    for _ in $(seq 1 30); do
+        if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then
+            exec 3>&- 3<&-
+            return
+        fi
+        sleep 1
+    done
+    echo "FAIL: sshd auf Port ${PORT} kam nicht hoch." >&2
+    exit 1
+}
+
 echo "=== Warte auf sshd auf Port ${PORT} ==="
-for _ in $(seq 1 30); do
-    if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then
-        exec 3>&- 3<&-
-        break
-    fi
-    sleep 1
-done
+wait_for_sshd
 
 # Borg-Client: dasselbe Image, "--entrypoint borg" statt sshd, im Host-
 # Netzwerk (damit es den published Port unter 127.0.0.1 erreicht) und mit
@@ -138,6 +146,41 @@ if BORG_REPO="${OTHER_REPO}" borg list >"${WORKDIR}/other-repo-out" 2>&1; then
     exit 1
 fi
 echo "OK (Zugriff verweigert, obwohl /data/otherclient existiert)"
+
+echo "=== Mehrere Borg-Versionen: Key mit <name>.version bekommt die richtige Binary ==="
+OLD_VERSION="1.2.8"
+ssh-keygen -q -t ed25519 -f "${WORKDIR}/backup_client_old" -C "backup-client-old" -N ""
+cp "${WORKDIR}/backup_client_old.pub" "${WORKDIR}/keys/backup/oldversion.pub"
+echo "${OLD_VERSION}" > "${WORKDIR}/keys/backup/oldversion.version"
+# .version-Datei wird nur beim Container-START gelesen (build-authorized-keys.sh
+# läuft nicht bei laufendem Container neu) - Neustart nötig, genau wie im
+# echten Betrieb nach add-backup-key.sh. Der published Port ist dynamisch
+# (-p 127.0.0.1::22 ohne festen Host-Port) und kann sich beim Neustart
+# ändern - danach neu abfragen statt den alten Wert weiterzubenutzen.
+docker restart "${CONTAINER}" >/dev/null
+PORT=$(docker port "${CONTAINER}" 22/tcp | head -n1 | cut -d: -f2)
+CONTAINER_SSH_OPTS="-p ${PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -o IdentitiesOnly=yes"
+wait_for_sshd
+# Alle *_RSH-Strings hängen vom (jetzt neuen) Port ab - neu bauen, sonst
+# reden die folgenden Schritte noch mit dem Port von vor dem Neustart.
+BACKUP_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/backup_client"
+OTHER_BACKUP_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/backup_client_other"
+ADMIN_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/admin"
+BORG_RSH="${BACKUP_RSH}"
+BORG_REPO="ssh://borg@127.0.0.1:${PORT}/data/testclient"
+
+OLD_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/backup_client_old"
+OLD_REPO="ssh://borg@127.0.0.1:${PORT}/data/oldversion"
+BORG_REPO="${OLD_REPO}" BORG_RSH="${OLD_RSH}" borg init --encryption=repokey-blake2
+BORG_REPO="${OLD_REPO}" BORG_RSH="${OLD_RSH}" borg create ::functional-test /work/testfile.txt
+BORG_REPO="${OLD_REPO}" BORG_RSH="${OLD_RSH}" borg list
+
+if ! docker logs "${CONTAINER}" 2>&1 | grep -qF "Backup-Key 'oldversion' -> /data/oldversion (append-only, borg-${OLD_VERSION})"; then
+    echo "FAIL: Log zeigt nicht, dass 'oldversion' wirklich borg-${OLD_VERSION} zugewiesen bekam." >&2
+    docker logs "${CONTAINER}" 2>&1 | tail -20 >&2
+    exit 1
+fi
+echo "OK (Key 'oldversion' läuft über borg-${OLD_VERSION}, init/create/list funktionieren damit)"
 
 echo "=== Append-Only greift: delete + compact mit Backup-Key gibt KEINEN Platz frei ==="
 SIZE_BEFORE=$(docker exec "${CONTAINER}" du -sk /data/testclient | cut -f1)

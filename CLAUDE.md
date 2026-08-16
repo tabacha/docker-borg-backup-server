@@ -92,6 +92,23 @@ wenn die Public-Key-Prüfung selbst erfolgreich wäre. Fix ist zweifach:
 Container ohne Passwort-Login) und zusätzlich `usermod -p '*'` im
 Dockerfile als Absicherung, falls PAM doch mal wieder aktiviert wird.
 
+### Mehrere Borg-Versionen (`BORG_VERSIONS` im Dockerfile)
+
+Wie Hetzners Storage Box (mehrere Server-Binaries wie `borg-1.4`): das Image
+installiert mehrere Borg-Versionen parallel, je in einem eigenen venv unter
+`/opt/borg-<version>` (pip kann pro Umgebung nur eine Version eines Pakets
+halten), verlinkt als `/usr/local/bin/borg-<version>`.
+`BORG_DEFAULT_VERSION` bekommt zusätzlich den Symlink ohne Suffix (`borg`).
+Welche Version ein Key benutzt, wird NICHT vom Client zur Verbindungszeit
+bestimmt (das würde den Sinn des Forced Command unterlaufen), sondern vom
+Admin beim Registrieren (`add-backup-key.sh <name> <pubkey> [version]`) fest
+verdrahtet — landet in `keys/backup/<name>.version`,
+`build-authorized-keys.sh` liest das und traegt für genau diesen Key
+`command="borg-<version> serve ..."` statt `command="borg serve ..."` ein.
+Eine angeforderte Version, die nicht installiert ist, lässt
+`build-authorized-keys.sh` (und damit den Container-Start) mit klarer
+Fehlermeldung abbrechen statt still auf die Default-Version umzufallen.
+
 ### Datenhaltung: `/data` als eigenes (nicht `external:`) Volume
 
 Anders als `docker-borg-backup`s Cache/Config-Volumes (dort `external: true`,

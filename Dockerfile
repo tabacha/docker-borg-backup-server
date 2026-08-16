@@ -1,6 +1,15 @@
 FROM python:3.14-slim
 
-ARG BORG_VERSION=1.4.5
+# Mehrere Borg-Versionen parallel installiert, aehnlich wie Hetzners Storage
+# Box mehrere Server-Binaries anbietet (dort z.B. "borg-1.4") - alte Clients
+# muessen so nicht zwangsweise auf die neueste Server-Version migrieren.
+# Jede Version bekommt ihr eigenes venv (pip kann pro Umgebung nur eine
+# Version eines Pakets halten) und einen Symlink /usr/local/bin/borg-<version>.
+# BORG_DEFAULT_VERSION bekommt zusaetzlich den Symlink ohne Suffix ("borg") -
+# das ist die Version, die Keys OHNE eigene <name>.version-Datei benutzen
+# (siehe build-authorized-keys.sh). Muss Teil von BORG_VERSIONS sein.
+ARG BORG_VERSIONS="1.4.5 1.2.8"
+ARG BORG_DEFAULT_VERSION=1.4.5
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -12,7 +21,14 @@ RUN apt-get update \
       libacl1-dev \
       liblz4-dev \
       libzstd-dev \
- && pip install --no-cache-dir "borgbackup==${BORG_VERSION}" \
+ && set -e \
+ && for VERSION in ${BORG_VERSIONS}; do \
+        python3 -m venv "/opt/borg-${VERSION}"; \
+        "/opt/borg-${VERSION}/bin/pip" install --no-cache-dir --quiet "borgbackup==${VERSION}"; \
+        ln -s "/opt/borg-${VERSION}/bin/borg" "/usr/local/bin/borg-${VERSION}"; \
+    done \
+ && test -x "/usr/local/bin/borg-${BORG_DEFAULT_VERSION}" \
+ && ln -s "/usr/local/bin/borg-${BORG_DEFAULT_VERSION}" /usr/local/bin/borg \
  && apt-get purge -y \
       ca-certificates \
       build-essential \

@@ -125,6 +125,50 @@ in seinem eigenen `/data/<name>`, `--restrict-to-repository` verhindert
 strikt, dass ein Backup-Key auf das Repo eines anderen Clients zugreifen
 kann (selbst wenn beide Repos existieren). Ein Admin-Key sieht dagegen alle.
 
+## Mehrere Borg-Versionen
+
+Ähnlich wie Hetzners Storage Box mehrere Server-Binaries parallel anbietet
+(dort z.B. `borg-1.4`), damit nicht jeder Client sofort auf die neueste
+Server-Version migrieren muss, installiert das Image standardmäßig mehrere
+Borg-Versionen nebeneinander (`BORG_VERSIONS` im `Dockerfile`, aktuell `1.4.5`
+und `1.2.8`) — jede unter `/usr/local/bin/borg-<version>`, die
+`BORG_DEFAULT_VERSION` zusätzlich ohne Suffix als `borg`.
+
+Ohne weitere Angabe benutzt ein Key die Default-Version. Für eine bestimmte
+Version stattdessen:
+
+```bash
+./add-backup-key.sh <name> /pfad/zu/pubkey 1.2.8
+./add-admin-key.sh <name> /pfad/zu/pubkey 1.2.8
+```
+
+Das legt zusätzlich `keys/backup/<name>.version` (bzw. `keys/admin/...`) an —
+`build-authorized-keys.sh` liest das beim nächsten Container-Start und trägt
+für genau diesen Key `command="borg-1.2.8 serve ..."` statt `command="borg
+serve ..."` ein. Eine angeforderte Version, die nicht installiert ist, lässt
+den Container-Start mit einer klaren Fehlermeldung abbrechen (keine stille
+falsche Version).
+
+**Wichtig:** `BORG_REMOTE_PATH` in der `.env` des Clients ist dabei nur zur
+Doku für Menschen gedacht — der Server ignoriert wegen des Forced Commands
+ohnehin, was der Client tatsächlich anfragt, und benutzt immer die für den
+jeweiligen Key hinterlegte Version. `add-backup-key.sh` gibt den passenden
+`BORG_REMOTE_PATH`-Wert am Ende trotzdem mit aus, damit beide Seiten für
+Menschen nachvollziehbar dieselbe Version nennen.
+
+Zusätzliche Versionen bauen (compose.yml hat dafür keinen eigenen Build-Arg-
+Mechanismus, direkt mit `docker build` arbeiten):
+
+```bash
+docker build --build-arg BORG_VERSIONS="1.4.5 1.2.8 1.1.18" -t <image-tag> .
+```
+
+Installierte Versionen in einem laufenden Container auflisten:
+
+```bash
+docker compose exec borg-server sh -c 'ls /usr/local/bin/borg-*'
+```
+
 ## Sonstiges
 
 - **`/data`** ist ein normales (nicht `external:`) Compose-Volume — dieses

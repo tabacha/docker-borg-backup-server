@@ -21,11 +21,42 @@
 # "restrict" (statt einzelner no-*-Optionen) deaktiviert nebenbei
 # Port-/Agent-Forwarding, PTY, X11 - alles, was ueber reines "borg serve"
 # hinausgeht.
+#
+# Borg-Version pro Key: liegt neben <name>.pub eine <name>.version-Datei
+# (per add-backup-key.sh/add-admin-key.sh optional erzeugt), wird deren
+# Inhalt als Versions-Suffix benutzt (z.B. "1.2.8" -> Binary "borg-1.2.8",
+# muss im Image installiert sein, siehe Dockerfile BORG_VERSIONS). Ohne
+# eine solche Datei kommt die Default-Version ("borg" ohne Suffix) zum
+# Einsatz - aehnlich wie Hetzners Storage Box mehrere Server-Binaries
+# parallel anbietet, damit alte Clients nicht zwangsweise mitziehen muessen.
 
 set -euo pipefail
 
 AUTHORIZED_KEYS="/home/borg/.ssh/authorized_keys"
 DATA_DIR="/data"
+
+resolve_borg_binary() {
+    local pubkey_file="$1"
+    local version_file="${pubkey_file%.pub}.version"
+
+    if [ ! -f "${version_file}" ]; then
+        echo "borg"
+        return
+    fi
+
+    local version binary
+    version="$(tr -d '[:space:]' < "${version_file}")"
+    binary="borg-${version}"
+
+    if ! command -v "${binary}" >/dev/null 2>&1; then
+        echo "ERROR: ${version_file} verlangt Borg-Version '${version}', aber '${binary}' ist in diesem Image nicht installiert." >&2
+        echo "Installierte Versionen:" >&2
+        compgen -c borg- | sort >&2
+        exit 1
+    fi
+
+    echo "${binary}"
+}
 
 : > "${AUTHORIZED_KEYS}"
 
@@ -37,15 +68,17 @@ for pubkey_file in /keys/backup/*.pub; do
     mkdir -p "${repo_dir}"
     chown borg:borg "${repo_dir}"
     pubkey="$(cat "${pubkey_file}")"
-    echo "command=\"borg serve --append-only --restrict-to-repository ${repo_dir}\",restrict ${pubkey}" >> "${AUTHORIZED_KEYS}"
-    echo "Backup-Key '${name}' -> ${repo_dir} (append-only)"
+    binary="$(resolve_borg_binary "${pubkey_file}")"
+    echo "command=\"${binary} serve --append-only --restrict-to-repository ${repo_dir}\",restrict ${pubkey}" >> "${AUTHORIZED_KEYS}"
+    echo "Backup-Key '${name}' -> ${repo_dir} (append-only, ${binary})"
 done
 
 for pubkey_file in /keys/admin/*.pub; do
     name="$(basename "${pubkey_file}" .pub)"
     pubkey="$(cat "${pubkey_file}")"
-    echo "command=\"borg serve --restrict-to-path ${DATA_DIR}\",restrict ${pubkey}" >> "${AUTHORIZED_KEYS}"
-    echo "Admin-Key '${name}' -> voller Zugriff auf ${DATA_DIR}"
+    binary="$(resolve_borg_binary "${pubkey_file}")"
+    echo "command=\"${binary} serve --restrict-to-path ${DATA_DIR}\",restrict ${pubkey}" >> "${AUTHORIZED_KEYS}"
+    echo "Admin-Key '${name}' -> voller Zugriff auf ${DATA_DIR} (${binary})"
 done
 
 if [ ! -s "${AUTHORIZED_KEYS}" ]; then
