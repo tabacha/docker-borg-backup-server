@@ -3,8 +3,16 @@
 # ---- Builder-Stage: Compiler/Header/pip nur hier, nie im Endergebnis ----
 FROM python:3.14-slim AS builder
 
-# Siehe Kommentar bei der Runtime-Stage unten - hier nur der Teil, der zum
-# Bauen der venvs noetig ist.
+# ARG-Werte werden von Docker bei jedem "FROM" zurueckgesetzt - ein "ARG"
+# VOR der ersten FROM-Zeile waere nur in FROM-Zeilen selbst sichtbar, nicht
+# in RUN-Befehlen einer Stage. Deshalb steht diese Zeile zwangsweise ZWEI
+# MAL im Dockerfile (hier und nochmal unten bei der Runtime-Stage, mit
+# identischem Default) - keine Kopierpanne, sondern Docker-Mechanik. Ein
+# einzelnes "docker build --build-arg BORG_VERSIONS=..." reicht trotzdem:
+# das gilt automatisch fuer alle gleichnamigen ARGs in allen Stages. Nur
+# die hartcodierten DEFAULTS hier und unten muessen von Hand synchron
+# gehalten werden, wenn man sie dauerhaft (nicht nur per --build-arg)
+# aendern will.
 ARG BORG_VERSIONS="1.4.5 1.2.8"
 
 RUN apt-get update \
@@ -30,6 +38,9 @@ RUN set -e \
 # ---- Runtime-Stage: nur was sshd/borg zur Laufzeit tatsaechlich braucht ----
 FROM python:3.14-slim
 
+# BORG_VERSIONS hier erneut deklariert (identischer Default wie oben in der
+# Builder-Stage) - notwendig, kein Copy-Paste-Versehen, siehe Kommentar dort.
+#
 # BORG_DEFAULT_VERSION bekommt zusaetzlich den Symlink ohne Suffix ("borg") -
 # das ist die Version, die Keys OHNE eigene <name>.version-Datei benutzen
 # (siehe build-authorized-keys.sh). Muss Teil von BORG_VERSIONS sein.
