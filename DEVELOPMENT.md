@@ -72,6 +72,18 @@ Zwei Workflows unter `.github/workflows/`, analog zu `docker-borg-backup`:
 
 ## Sonstiges (intern)
 
+- **Schlankes Image:** `Dockerfile` baut zweistufig — eine Builder-Stage mit
+  Compiler/Headern (nur dort, für die Borg-C-Extensions nötig) und eine
+  Runtime-Stage, die nur noch `openssh-server` plus die tatsächlich per
+  `ldd` ermittelten Laufzeit-Bibliotheken (`libacl1`, `libssl3t64`,
+  `liblz4-1`, `libxxhash0`, `libzstd1`, `zlib1g`) bekommt. Kein
+  Compiler/Header/pip-Cache im ausgelieferten Image. `apt`/`dpkg` selbst
+  bleiben trotzdem drin — die sind Teil der `python:3.14-slim`-Basis (jedes
+  Debian-basierte Image braucht seinen eigenen Paketmanager, um überhaupt
+  etwas installieren zu können) und ließen sich nur durch einen Wechsel auf
+  eine komplett andere (nicht-Debian-)Basis entfernen — bewusst nicht
+  gemacht, das wäre ein größerer, riskanterer Schritt für vergleichsweise
+  wenig zusätzlichen Gewinn.
 - `docker run -v "$(pwd):/ziel" ...` kann in manchen Sandbox-/CI-Setups mit
   "mkdir ... file exists" fehlschlagen (Bind-Mount-Quirk) — betroffene
   Dateien dann in ein Scratch-Verzeichnis kopieren und von dort aus mounten.
