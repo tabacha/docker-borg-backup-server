@@ -304,4 +304,6 @@ sonst könnte eine zeitgleich eintreffende Verbindung mitten im Neuschreiben
 eine leere Datei zu sehen bekommen.
 
 Willst du am Repo selbst mitarbeiten (Skripte ändern, CI/Release-Pipeline)?
-Siehe [DEVELOPMENT.md](DEVELOPMENT.md).
+Siehe [DEVELOPMENT.md](DEVELOPMENT.md). Diskutierte, aber nicht
+implementierte/nicht offiziell getestete Ideen (z.B. ein Modus ganz ohne
+Dauercontainer) stehen in [EXPERIMENTAL.md](EXPERIMENTAL.md).
