@@ -218,6 +218,18 @@ Prüfung der Forced-Command-Syntax) — für Inhalt und Syntax bist du in
 diesem Modus selbst verantwortlich; ein Tippfehler dort schlägt erst beim
 tatsächlichen Verbindungsversuch fehl, nicht beim Reload selbst.
 
+**Warum wird die Datei kopiert, statt `sshd` direkt auf den Mount zu
+zeigen?** Das wäre naheliegend — sshd liest ohnehin bei jeder Verbindung
+frisch, ein direkter Verweis bräuchte also nicht mal `./reload-keys.sh`.
+Geht aber nicht: `sshd`s `StrictModes`-Prüfung verlangt, dass
+`authorized_keys` dem Zieluser oder `root` gehört. Eine gemountete Datei
+gehört aber dem UID, der sie auf dem *Host* angelegt hat — sshd verweigert
+dann jede Anmeldung damit ("Authentication refused: bad ownership or modes
+for file ..."), unabhängig vom Inhalt. Der Copy-Schritt (`chown`, `chmod
+600`, atomar) übernimmt die Rechtekontrolle deshalb bewusst selbst,
+unabhängig davon, wem die Quelldatei auf dem Host gehört — kostet dafür den
+einen zusätzlichen `reload-keys.sh`-Aufruf nach jeder manuellen Änderung.
+
 ## Mehrere Borg-Versionen
 
 Ähnlich wie Hetzners Storage Box mehrere Server-Binaries parallel anbietet
