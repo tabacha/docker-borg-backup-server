@@ -13,7 +13,9 @@ Usage: add-backup-key.sh <name> <pubkey-datei> [--uid N] [--version V] [--from P
 
 Legt users/<uid>-<name>/keys/backup/<datei>.pub an und ruft reload-keys.sh.
 Existiert <name> schon, wird der Key als zusaetzlicher Key derselben
-Identitaet ergaenzt (z.B. fuer Rotation).
+Identitaet ergaenzt (z.B. fuer Rotation). Ist <name> schon eine
+Admin-Identitaet, bekommt sie zusaetzlich die Backup-Rolle - beide Forced
+Commands gelten dann parallel fuer diese eine Identitaet.
 
   --uid N         feste UID fuer eine neue Identitaet (sonst automatisch,
                    Bereich 1000-2000)
@@ -82,10 +84,12 @@ if [ "${ACCEPTED}" -eq 0 ]; then
 fi
 
 # Existierende Identitaet mit demselben Namen wiederverwenden statt eine
-# zweite anzulegen (waere ohnehin ein harter Fehler in build-authorized-keys.sh).
+# zweite anzulegen (waere ohnehin ein harter Fehler in build-authorized-keys.sh:
+# doppelt vergebene UID/doppelt vergebener Name). Hat sie schon Admin-Keys,
+# bekommt sie damit zusaetzlich die Backup-Rolle - build-authorized-keys.sh
+# traegt beide Forced Commands parallel ein, siehe CLAUDE.md.
 EXISTING_DIR=""
 EXISTING_UID=""
-EXISTING_ROLE=""
 for entry in "${USERS_DIR}"/*/; do
     [ -d "${entry}" ] || continue
     base="$(basename "${entry}")"
@@ -93,17 +97,9 @@ for entry in "${USERS_DIR}"/*/; do
     if [ "${BASH_REMATCH[2]}" = "${NAME}" ]; then
         EXISTING_DIR="${entry}"
         EXISTING_UID="${BASH_REMATCH[1]}"
-        if [ -n "$(compgen -G "${entry}keys/admin/*.pub")" ]; then
-            EXISTING_ROLE="admin"
-        fi
         break
     fi
 done
-
-if [ -n "${EXISTING_ROLE}" ]; then
-    echo "ERROR: '${NAME}' ist schon als Admin-Identitaet registriert (${EXISTING_DIR}keys/admin/) - kann nicht gleichzeitig Backup-Rolle bekommen." >&2
-    exit 1
-fi
 
 if [ -n "${EXISTING_DIR}" ]; then
     if [ -n "${UID_OPT}" ] && [ "${UID_OPT}" != "${EXISTING_UID}" ]; then

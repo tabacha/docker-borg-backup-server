@@ -25,8 +25,8 @@ davon (Forced Commands / Append-Only-Durchsetzung). Vollständige Doku in
 Kein klassisches Unit-Test-Framework, aber `.github/scripts/functional-test.sh`
 ist ein echter Funktionstest — startet den Container wirklich (echter
 `sshd`, echtes `borg serve`), verbindet sich per SSH von außen und prüft die
-tatsächliche Sicherheitsgrenze (Forced Command, `--restrict-to-repository`
-vs. `--restrict-to-path`, Append-Only), nicht nur "Verbindung klappt". Details
+tatsächliche Sicherheitsgrenze (Forced Command, `--restrict-to-repository`,
+Append-Only), nicht nur "Verbindung klappt". Details
 und alle Einzelbefehle (shellcheck/hadolint/actionlint/compose config) in
 `DEVELOPMENT.md`.
 
@@ -63,15 +63,6 @@ Wichtige, beim Debuggen schon aufgetretene Stolperfallen:
   design), nicht nur wenn das letzte Glied (`grep`) fehlschlägt. Fix:
   Ausgabe erst in eine Variable einfangen (`out="$(ssh ... 2>&1 || true)"`),
   dann separat `grep` drauf. Siehe `functional-test.sh`s `wait_for_sshd()`.
-- **Gruppenbasierter Zugriff (z.B. `borgadmins` auf `/data/<name>`) braucht
-  Setgid UND einen passenden `--umask`, nicht nur `chmod g+...` auf dem
-  Verzeichnis selbst**: ein Verzeichnis kann `770`/Gruppe `borgadmins` sein
-  — neue DATEIEN darin erben trotzdem nur die primäre Gruppe des
-  erzeugenden Prozesses (nicht automatisch die Verzeichnisgruppe) UND
-  Borgs Standard-`--umask` (`0077`) streicht Gruppen-Bits bei jeder neuen
-  Datei ohnehin sofort weg. Erst Setgid (`chmod 2770`) PLUS `--umask 0007`
-  im Forced Command zusammen ergeben tatsächlichen Gruppenzugriff auf
-  einzelne Repo-Dateien, nicht nur aufs Verzeichnis selbst.
 
 ## Architecture
 
@@ -165,25 +156,26 @@ Admin-Rolle) bekommt ein Forced Command (`command="borg serve ..."`) plus
 `restrict`. Es gibt keine interaktive Shell auf diesem Server — auch kein
 Admin-Account bekommt eine. `restrict` deaktiviert nebenbei
 Port-/Agent-Forwarding, PTY, X11. Die Unterscheidung Backup- vs.
-Admin-Rolle passiert über die Flags im Forced Command (jede Identität hat
-GENAU eine Rolle, siehe unten) - seit der Multi-User-Isolation zusätzlich
-über unterschiedliche Unix-Accounts, nicht mehr nur über den Inhalt eines
-gemeinsamen Forced Command wie frueher.
+Admin-Rolle passiert über die Flags im Forced Command - pro KEY, nicht pro
+Identität: eine Identität kann Keys in `keys/backup/` UND `keys/admin/`
+gleichzeitig haben und bekommt dann beide Forced Commands parallel in
+derselben `authorized_keys/<name>`-Datei (siehe "Ein Unix-Account pro
+Identität" unten) - seit der Multi-User-Isolation zusätzlich über
+unterschiedliche Unix-Accounts abgesichert, nicht mehr nur über den Inhalt
+eines gemeinsamen Forced Command wie frueher.
 
-### `--restrict-to-repository` (Backup) vs. `--restrict-to-path` (Admin)
+### `--restrict-to-repository`: Backup UND Admin, immer exakt EIN Pfad
 
-Leicht zu verwechseln, semantisch unterschiedlich:
-
-- `--restrict-to-repository PATH`: erlaubt **exakt** `PATH`, keine
-  Unterverzeichnisse. Für Backup-Keys — genau ein Repo pro Key.
-- `--restrict-to-path PATH`: erlaubt `PATH` **und** Unterverzeichnisse. Für
-  Admin-Keys — ein Admin muss mehrere Client-Repos unter `/data/<name1>`,
-  `/data/<name2>`, ... erreichen können.
-
-Wer hier `--restrict-to-repository /data` für den Admin-Key einsetzt (statt
-`--restrict-to-path`), bricht den Mehrere-Clients-Anwendungsfall komplett —
-das Admin-Serve würde dann nur noch exakt `/data` selbst als Repo erlauben,
-kein `/data/<name>` mehr. Siehe `build-authorized-keys.sh`.
+Beide Rollen benutzen `--restrict-to-repository /data/<name>` - erlaubt
+**exakt** diesen einen Pfad, keine Unterverzeichnisse, kein Ausbruch. Der
+einzige Unterschied ist `--append-only` beim Backup-Key. Es gibt bewusst
+KEIN `--restrict-to-path` (das würde Unterverzeichnisse erlauben) und
+keinen Key mit Zugriff auf mehrere Repos gleichzeitig - jeder Key gehört zu
+GENAU einer Identität und erreicht GENAU deren eigenes `/data/<name>`,
+nichts sonst. Soll dieselbe Person mehrere Repos administrieren, wird ihr
+Pubkey mehrfach registriert (einmal je Ziel-Identität via
+`add-admin-key.sh <name> <derselbe-pubkey>`), nicht über einen einzelnen
+Key mit weiter gefasster Berechtigung. Siehe `build-authorized-keys.sh`.
 
 ### Ein Unix-Account pro Identität (`users/<uid>-<name>/`)
 
@@ -214,12 +206,29 @@ Mehrere `*.pub`-Dateien im selben `keys/backup/`/`keys/admin/` sind mehrere
 gleichzeitig gültige Keys für DIESELBE Identität (Rotation, mehrere Geräte)
 - kein Sondermechanismus dafür nötig, ergibt sich einfach aus dem Layout.
 
+**Eine Identität darf beide Rollen gleichzeitig haben** (Keys in sowohl
+`keys/backup/` als auch `keys/admin/`) - z.B. ein Backup-Client, für dessen
+eigenes Repo zusätzlich eine feste Liste von Personen vollen Admin-Zugriff
+bekommen soll, ohne dafür eine zweite Identität mit eigener UID anzulegen
+(`add-admin-key.sh <name-der-backup-identitaet> <adminkey.pub>`). In
+`build-authorized-keys.sh` ist das KEIN Sonderfall auf Identitätsebene
+(`ROLE_OF_NAME` ist nur noch eine Beschriftung fürs Log), sondern
+`BACKUP_PUBFILES_OF_NAME`/`ADMIN_PUBFILES_OF_NAME` werden pro Identität
+unabhängig befüllt und in `apply_all()` beide (falls vorhanden) über
+`append_key_lines()` in dieselbe `authorized_keys/<name>`-Datei geschrieben
+- der Admin-Key bekommt dabei GENAU dasselbe `--restrict-to-repository
+<home_dir>` wie der Backup-Key, nur ohne `--append-only` (darf also
+wirklich `prune`/`delete`/`compact`). Es gibt keine "größere" Admin-Rolle
+mit Zugriff auf fremde Repos (siehe "Keine gruppenbasierte
+Cross-Account-Berechtigung" unten) - ein Admin-Key ist grundsätzlich genau
+so stark beschränkt wie der Backup-Key derselben Identität, nur ohne
+Append-Only.
+
 **Zwei-Phasen-Ausführung, bewusst getrennt** (`validate_all()` /
 `apply_all()` in `build-authorized-keys.sh`): Phase 1 liest nur, verändert
 nichts, sammelt ALLE Fehler statt beim ersten abzubrechen. Findet sich
 dabei auch nur EIN harter Fehler (doppelt vergebene UID/Name, UID außerhalb
-1000-2000, eine Identität mit Keys in sowohl `keys/backup/` als auch
-`keys/admin/`, eine nicht installierte Borg-Version), wird GAR NICHTS
+1000-2000, eine nicht installierte Borg-Version), wird GAR NICHTS
 angewendet - weder ein neuer Account angelegt noch eine bestehende
 `authorized_keys/<name>`-Datei verändert. Läuft der Container schon, bleibt
 der zuletzt gültige Stand vollständig unangetastet (ein Tippfehler bei
@@ -242,22 +251,16 @@ root:root + 600 ergibt "Permission denied", weil sshd eine solche Datei
 liest. Root:root bleibt trotzdem der Owner - nur SCHREIBZUGRIFF ist
 exklusiv, der Inhalt (Pubkey + Forced Command) ist ohnehin nicht geheim.
 
-**Admin-Zugriff auf fremde Repos (`borgadmins`-Gruppe):** `--restrict-to-path
-/data` im Forced Command allein reicht nicht - ohne zusätzliche Unix-Rechte
-würde ein Admin-Account an der Dateisystem-Berechtigung eines fremden,
-700-geschützten `/data/<name>` scheitern. Jeder Admin-Account ist deshalb
-zusätzlich Mitglied der Gruppe `borgadmins`; jedes Backup-Client-`/data/<name>`
-gehört gruppenseitig `borgadmins` (Owner bleibt der Client selbst). Reicht
-für sich allein aber noch nicht: **Setgid** (`chmod 2770`, nicht nur `770`)
-ist nötig, damit NEUE Dateien darin die Verzeichnisgruppe erben (sonst
-erben sie die private Gruppe des erzeugenden Prozesses), UND **`--umask
-0007`** im Forced Command (statt Borgs Default `0077`), weil der Default-
-Umask Gruppen-Bits bei jeder neu angelegten Datei sonst sofort wieder
-wegstreicht. Erst alle drei Zutaten zusammen (Gruppenmitgliedschaft +
-Setgid + Umask) ergeben tatsächlichen Admin-Zugriff auf einzelne
-Repo-Dateien, nicht nur aufs Verzeichnis selbst - per
-`.github/scripts/functional-test.sh` empirisch verifiziert (Admin
-kompaktiert ein fremdes, vom Backup-Client selbst angelegtes Repo).
+**Keine gruppenbasierte Cross-Account-Berechtigung:** `/data/<name>` gehört
+IMMER exklusiv dem eigenen Unix-Account (`chown <name>:<name>`, `chmod
+700`) - keine gemeinsame Gruppe, kein Setgid, kein `--umask`-Override.
+Bewusste Entscheidung: kein Admin-Key soll je über Dateibesitz an ein
+fremdes Repo kommen können, auch nicht über einen indirekten Mechanismus
+wie eine geteilte Unix-Gruppe. Ein Admin-Key erreicht deshalb ausschließlich
+das Repo der eigenen Identität (`--restrict-to-repository <home_dir>`, s.o.)
+- braucht mehrere Repos Admin-Zugriff, wird derselbe Pubkey einfach mehrfach
+registriert (einmal je Ziel-Identität), nicht über erweiterte
+Datei-/Gruppenrechte auf einem einzelnen Account.
 
 ### Host-Key: kein `.pub` im Image, wird zur Laufzeit abgeleitet
 
