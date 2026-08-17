@@ -12,11 +12,14 @@ usage() {
 Usage: add-admin-key.sh <name> <pubkey-datei> [--uid N] [--version V] [--from PATTERN]
 
 Legt users/<uid>-<name>/keys/admin/<datei>.pub an und ruft reload-keys.sh -
-voller Zugriff (prune/delete/compact) auf jedes Repo unter /data. Existiert
-<name> schon, wird der Key als zusaetzlicher Key derselben Identitaet
-ergaenzt (mehrere Admins/Geraete/Rotation). Ist <name> schon eine
-Backup-Identitaet, bekommt sie zusaetzlich die Admin-Rolle - beide Forced
-Commands gelten dann parallel fuer diese eine Identitaet.
+voller Zugriff (prune/delete/compact), aber NUR auf das eine Repo dieser
+Identitaet (/data/<name>), nie auf ein fremdes. Existiert <name> schon,
+wird der Key als zusaetzlicher Key derselben Identitaet ergaenzt (mehrere
+Admins/Geraete/Rotation). Ist <name> schon eine Backup-Identitaet, bekommt
+sie zusaetzlich die Admin-Rolle - beide Forced Commands gelten dann
+parallel fuer diese eine Identitaet, weiterhin beschraenkt auf ihr eigenes
+Repo. Um mehrere Repos zu verwalten, denselben Pubkey mehrfach registrieren
+- einmal je Ziel-Identitaet.
 
   --uid N         feste UID fuer eine neue Identitaet (sonst automatisch,
                    Bereich 1000-2000)
@@ -83,12 +86,11 @@ fi
 
 # Existierende Identitaet mit demselben Namen wiederverwenden statt eine
 # zweite anzulegen. Hat sie schon Backup-Keys, bekommt sie damit zusaetzlich
-# zur Backup- auch die Admin-Rolle (voller Zugriff auf GENAU ihr eigenes
-# Repo, wie auf jedes andere unter /data) - build-authorized-keys.sh traegt
+# zur Backup- auch die Admin-Rolle - beide bleiben auf GENAU ihr eigenes
+# Repo beschraenkt (restrict-to-repository), build-authorized-keys.sh traegt
 # beide Forced Commands parallel ein, siehe CLAUDE.md.
 EXISTING_DIR=""
 EXISTING_UID=""
-EXISTING_HAS_BACKUP=""
 for entry in "${USERS_DIR}"/*/; do
     [ -d "${entry}" ] || continue
     base="$(basename "${entry}")"
@@ -96,17 +98,9 @@ for entry in "${USERS_DIR}"/*/; do
     if [ "${BASH_REMATCH[2]}" = "${NAME}" ]; then
         EXISTING_DIR="${entry}"
         EXISTING_UID="${BASH_REMATCH[1]}"
-        if [ -n "$(compgen -G "${entry}keys/backup/*.pub")" ]; then
-            EXISTING_HAS_BACKUP=1
-        fi
         break
     fi
 done
-
-if [ -n "${EXISTING_HAS_BACKUP}" ]; then
-    echo "Hinweis: '${NAME}' ist schon als Backup-Identitaet registriert (${EXISTING_DIR}keys/backup/) -"
-    echo "bekommt zusaetzlich die Admin-Rolle fuer ihr eigenes UND jedes andere Repo unter /data."
-fi
 
 if [ -n "${EXISTING_DIR}" ]; then
     if [ -n "${UID_OPT}" ] && [ "${UID_OPT}" != "${EXISTING_UID}" ]; then

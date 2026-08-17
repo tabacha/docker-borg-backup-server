@@ -10,18 +10,17 @@
 #     (restrict-to-repository greift, nicht nur "Verzeichnis fehlt").
 #   - Backup-Key bekommt KEINE Shell (Forced Command überschreibt jedes
 #     angeforderte Kommando).
-#   - Admin-Key darf compacten - UND das trotz eines eigenen Unix-Accounts
-#     (nicht mehr derselbe User wie der Backup-Client!), also nur möglich,
-#     wenn die Gruppenrechte auf /data/<name> (Owner=Client, Gruppe=
-#     borgadmins, Modus 770) UND StrictModes tatsächlich zusammenspielen -
-#     genau die Annahme, die dieser Test empirisch verifiziert statt sie nur
-#     zu behaupten.
+#   - Ein eigener Admin-Key derselben Identität darf compacten (der
+#     Backup-Key nicht, s.o.) - aber, weil es keine gruppenbasierte
+#     Cross-Account-Berechtigung mehr gibt, AUSSCHLIESSLICH im eigenen
+#     Repo, nie in einem fremden /data/<name>.
 #   - Mehrere Keys für dieselbe Identität (Rotation) sind gleichzeitig
 #     gültig.
 #   - Eine Identität mit Keys sowohl unter keys/backup/ als auch keys/admin/
-#     bekommt beide Forced Commands parallel - ihr Backup-Key bleibt trotzdem
-#     auf restrict-to-repository beschränkt, ihr Admin-Key erreicht (wie ein
-#     separater Admin-Account) jedes Repo unter /data.
+#     bekommt beide Forced Commands parallel in derselben
+#     authorized_keys/<name>-Datei, beide exakt auf ihr eigenes Repo
+#     beschränkt (restrict-to-repository) - nur der Backup-Key ist
+#     zusätzlich append-only.
 #   - Ein Key mit eigener <key>.version-Datei benutzt wirklich die dort
 #     angegebene Borg-Version.
 #   - SSHD_PUBKEY_ALGORITHMS als Env-Override erlaubt wirklich einen
@@ -59,13 +58,10 @@ echo "=== Test-Keys erzeugen ==="
 ssh-keygen -q -t ed25519 -f "${WORKDIR}/secrets/ssh_host_ed25519_key" -C "" -N ""
 ssh-keygen -q -t ed25519 -f "${WORKDIR}/backup_client" -C "backup-client" -N ""
 ssh-keygen -q -t ed25519 -f "${WORKDIR}/backup_client_other" -C "backup-client-other" -N ""
-ssh-keygen -q -t ed25519 -f "${WORKDIR}/admin" -C "admin" -N ""
 mkdir -p "${WORKDIR}/users/1000-testclient/keys/backup" \
-         "${WORKDIR}/users/1001-otherclient/keys/backup" \
-         "${WORKDIR}/users/2000-admin1/keys/admin"
+         "${WORKDIR}/users/1001-otherclient/keys/backup"
 cp "${WORKDIR}/backup_client.pub" "${WORKDIR}/users/1000-testclient/keys/backup/key1.pub"
 cp "${WORKDIR}/backup_client_other.pub" "${WORKDIR}/users/1001-otherclient/keys/backup/key1.pub"
-cp "${WORKDIR}/admin.pub" "${WORKDIR}/users/2000-admin1/keys/admin/key1.pub"
 echo "hello from functional-test" > "${WORKDIR}/testfile.txt"
 # Braucht genug Inhalt, damit ein "compact" messbar Platz freigibt (siehe
 # Append-Only-Check unten) - Zufallsdaten, damit Kompression nichts wegkürzt.
@@ -141,7 +137,6 @@ SSH_OPTS=(-p "${PORT}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/nu
 CONTAINER_SSH_OPTS="-p ${PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -o IdentitiesOnly=yes"
 BACKUP_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/backup_client"
 OTHER_BACKUP_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/backup_client_other"
-ADMIN_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/admin"
 
 BORG_RSH="${BACKUP_RSH}"
 BORG_REPO="ssh://testclient@127.0.0.1:${PORT}/data/testclient"
@@ -260,7 +255,7 @@ BORG_REPO="${OLD_REPO}" BORG_RSH="${OLD_RSH}" borg init --encryption=repokey-bla
 BORG_REPO="${OLD_REPO}" BORG_RSH="${OLD_RSH}" borg create ::functional-test /work/testfile.txt
 BORG_REPO="${OLD_REPO}" BORG_RSH="${OLD_RSH}" borg list
 
-if ! docker exec "${CONTAINER}" grep -qF "borg-${OLD_VERSION} --umask 0007 serve --append-only --restrict-to-repository /data/oldversion" /etc/ssh/authorized_keys/oldversion; then
+if ! docker exec "${CONTAINER}" grep -qF "borg-${OLD_VERSION} serve --append-only --restrict-to-repository /data/oldversion" /etc/ssh/authorized_keys/oldversion; then
     echo "FAIL: authorized_keys/oldversion zeigt nicht, dass 'oldversion' wirklich borg-${OLD_VERSION} zugewiesen bekam." >&2
     docker exec "${CONTAINER}" cat /etc/ssh/authorized_keys/oldversion >&2
     exit 1
@@ -278,65 +273,77 @@ if [ "${SIZE_AFTER_BACKUP_COMPACT}" -lt $(( SIZE_BEFORE * 9 / 10 )) ]; then
 fi
 echo "OK (Repo-Größe unverändert: ${SIZE_BEFORE}K -> ${SIZE_AFTER_BACKUP_COMPACT}K)"
 
-echo "=== Admin-Key (eigener Unix-User 'admin1'): compact gibt den Platz tatsächlich frei ==="
-echo "    (prüft dabei implizit, dass die borgadmins-Gruppenrechte auf /data/testclient"
-echo "    UND StrictModes bei $HOME=/data/admin1 wirklich zusammenspielen)"
-BORG_REPO="ssh://admin1@127.0.0.1:${PORT}/data/testclient" BORG_RSH="${ADMIN_RSH}" borg compact
-SIZE_AFTER_ADMIN_COMPACT=$(docker exec "${CONTAINER}" du -sk /data/testclient | cut -f1)
-if [ "${SIZE_AFTER_ADMIN_COMPACT}" -ge "${SIZE_AFTER_BACKUP_COMPACT}" ]; then
-    echo "FAIL: 'borg compact' mit dem Admin-Key hat keinen Platz freigegeben (${SIZE_AFTER_BACKUP_COMPACT}K -> ${SIZE_AFTER_ADMIN_COMPACT}K)." >&2
-    exit 1
-fi
-echo "OK (Repo geschrumpft: ${SIZE_AFTER_BACKUP_COMPACT}K -> ${SIZE_AFTER_ADMIN_COMPACT}K)"
-
-echo "=== Gemischte Rolle: 'testclient' bekommt zusätzlich einen eigenen Admin-Key ==="
+echo "=== Gemischte Rolle: 'testclient' bekommt zusätzlich einen eigenen Admin-Key (beschränkt auf SEIN Repo) ==="
 ssh-keygen -q -t ed25519 -f "${WORKDIR}/testclient_admin" -C "testclient-admin" -N ""
 mkdir -p "${WORKDIR}/users/1000-testclient/keys/admin"
 cp "${WORKDIR}/testclient_admin.pub" "${WORKDIR}/users/1000-testclient/keys/admin/key1.pub"
 docker exec "${CONTAINER}" /usr/local/bin/build-authorized-keys.sh >/dev/null
 
-if ! docker exec "${CONTAINER}" grep -qF "restrict-to-path /data" /etc/ssh/authorized_keys/testclient; then
-    echo "FAIL: authorized_keys/testclient bekam nach Hinzufügen eines Admin-Keys kein restrict-to-path." >&2
-    docker exec "${CONTAINER}" cat /etc/ssh/authorized_keys/testclient >&2
+# Erwartet GENAU 2 restrict-to-repository-Einträge (Backup + Admin, beide
+# exakt auf /data/testclient) und GENAU 1 davon mit --append-only (nur der
+# Backup-Key) - es gibt keine "größere" Admin-Berechtigung mit Zugriff auf
+# fremde Repos unter /data, siehe CLAUDE.md.
+AUTH_FILE_TESTCLIENT="$(docker exec "${CONTAINER}" cat /etc/ssh/authorized_keys/testclient)"
+if [ "$(echo "${AUTH_FILE_TESTCLIENT}" | grep -c "restrict-to-repository /data/testclient")" -ne 2 ]; then
+    echo "FAIL: authorized_keys/testclient hat nicht genau 2 restrict-to-repository-Einträge (Backup+Admin)." >&2
+    echo "${AUTH_FILE_TESTCLIENT}" >&2
     exit 1
 fi
-if ! docker exec "${CONTAINER}" grep -qF "restrict-to-repository /data/testclient" /etc/ssh/authorized_keys/testclient; then
-    echo "FAIL: authorized_keys/testclient hat den ursprünglichen Backup-Eintrag (restrict-to-repository) verloren." >&2
-    docker exec "${CONTAINER}" cat /etc/ssh/authorized_keys/testclient >&2
+if [ "$(echo "${AUTH_FILE_TESTCLIENT}" | grep -c -- "--append-only")" -ne 1 ]; then
+    echo "FAIL: authorized_keys/testclient hat nicht genau 1 append-only-Eintrag (nur der Backup-Key darf das sein)." >&2
+    echo "${AUTH_FILE_TESTCLIENT}" >&2
     exit 1
 fi
-echo "OK (beide Forced Commands stehen parallel in derselben authorized_keys-Datei)"
+if echo "${AUTH_FILE_TESTCLIENT}" | grep -qF "restrict-to-path /data\""; then
+    echo "FAIL: authorized_keys/testclient hat einen restrict-to-path /data-Eintrag - der Admin-Key sollte auf sein eigenes Repo beschränkt sein." >&2
+    echo "${AUTH_FILE_TESTCLIENT}" >&2
+    exit 1
+fi
+echo "OK (Backup- UND Admin-Forced-Command stehen parallel, beide exakt auf /data/testclient beschränkt, nur der Backup-Key ist append-only)"
 
 TESTCLIENT_ADMIN_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/testclient_admin"
+TESTCLIENT_OWN_REPO="ssh://testclient@127.0.0.1:${PORT}/data/testclient"
 # SSH-Username in der Repo-URL bestimmt, WESSEN authorized_keys sshd prüft -
 # der neue Admin-Key liegt unter authorized_keys/testclient (gleiche
 # Identität wie der Backup-Key), also muss die URL "testclient@" sein,
 # auch wenn der Pfad auf ein fremdes Repo (/data/otherclient) zeigt.
-TESTCLIENT_AS_ADMIN_REPO="ssh://testclient@127.0.0.1:${PORT}/data/otherclient"
+TESTCLIENT_AS_ADMIN_FOREIGN_REPO="ssh://testclient@127.0.0.1:${PORT}/data/otherclient"
 
-echo "=== ... der neue Admin-Key von 'testclient' erreicht damit auch ein FREMDES Repo (/data/otherclient) ==="
-BORG_REPO="${TESTCLIENT_AS_ADMIN_REPO}" BORG_RSH="${TESTCLIENT_ADMIN_RSH}" borg list
-echo "OK (voller Admin-Zugriff trotz gleichzeitiger Backup-Rolle derselben Identität)"
-
-echo "=== ... während der ursprüngliche Backup-Key derselben Identität (per --restrict-to-repository) weiterhin NUR sein eigenes Repo erreicht ==="
-# Bewusst mit korrektem Nutzernamen "testclient@..." (Auth klappt also), nur
-# der Pfad zeigt auf ein fremdes Repo - zeigt, dass --restrict-to-repository
-# selbst bei richtiger Identitaet/richtigem Key exakt einschraenkt, nicht nur
-# der SSH-Username/Unix-Account die Trennung leistet.
-TESTCLIENT_FOREIGN_REPO="ssh://testclient@127.0.0.1:${PORT}/data/otherclient"
-if BORG_REPO="${TESTCLIENT_FOREIGN_REPO}" borg list >"${WORKDIR}/mixed-backup-out" 2>&1; then
-    echo "FAIL: Backup-Key von 'testclient' konnte trotz --restrict-to-repository über die eigene Identität ein fremdes Repo (/data/otherclient) erreichen." >&2
-    cat "${WORKDIR}/mixed-backup-out" >&2
+echo "=== ... der neue Admin-Key von 'testclient' erreicht KEIN fremdes Repo (/data/otherclient) ==="
+if BORG_REPO="${TESTCLIENT_AS_ADMIN_FOREIGN_REPO}" BORG_RSH="${TESTCLIENT_ADMIN_RSH}" borg list >"${WORKDIR}/mixed-admin-foreign-out" 2>&1; then
+    echo "FAIL: Admin-Key von 'testclient' konnte auf /data/otherclient zugreifen - sollte auf sein eigenes Repo beschränkt sein." >&2
+    cat "${WORKDIR}/mixed-admin-foreign-out" >&2
     exit 1
 fi
-echo "OK (Backup-Key bleibt trotz zusätzlicher Admin-Rolle derselben Identität exakt auf /data/testclient beschränkt)"
+echo "OK (Zugriff verweigert)"
+
+echo "=== ... darf aber, anders als der Backup-Key derselben Identität, das eigene Repo wirklich kompaktieren ==="
+BORG_REPO="${TESTCLIENT_OWN_REPO}" BORG_RSH="${BACKUP_RSH}" borg create ::mixed-role-test /work/testfile.txt /work/bigfile.bin
+SIZE_BEFORE_MIXED=$(docker exec "${CONTAINER}" du -sk /data/testclient | cut -f1)
+BORG_REPO="${TESTCLIENT_OWN_REPO}" BORG_RSH="${BACKUP_RSH}" borg delete ::mixed-role-test
+BORG_REPO="${TESTCLIENT_OWN_REPO}" BORG_RSH="${BACKUP_RSH}" borg compact
+SIZE_AFTER_BACKUP_COMPACT_MIXED=$(docker exec "${CONTAINER}" du -sk /data/testclient | cut -f1)
+if [ "${SIZE_AFTER_BACKUP_COMPACT_MIXED}" -lt $(( SIZE_BEFORE_MIXED * 9 / 10 )) ]; then
+    echo "FAIL: 'borg compact' mit dem Append-Only-Backup-Key hat Platz freigegeben (${SIZE_BEFORE_MIXED}K -> ${SIZE_AFTER_BACKUP_COMPACT_MIXED}K), sollte es aber nicht." >&2
+    exit 1
+fi
+BORG_REPO="${TESTCLIENT_OWN_REPO}" BORG_RSH="${TESTCLIENT_ADMIN_RSH}" borg compact
+SIZE_AFTER_MIXED_ADMIN_COMPACT=$(docker exec "${CONTAINER}" du -sk /data/testclient | cut -f1)
+if [ "${SIZE_AFTER_MIXED_ADMIN_COMPACT}" -ge "${SIZE_AFTER_BACKUP_COMPACT_MIXED}" ]; then
+    echo "FAIL: eigener Admin-Key von 'testclient' hat trotz voller Rechte auf das eigene Repo keinen Platz freigegeben (${SIZE_AFTER_BACKUP_COMPACT_MIXED}K -> ${SIZE_AFTER_MIXED_ADMIN_COMPACT}K)." >&2
+    exit 1
+fi
+echo "OK (eigener Admin-Key kompaktiert wirklich, obwohl er auf GENAU dieses eine Repo beschränkt ist: ${SIZE_AFTER_BACKUP_COMPACT_MIXED}K -> ${SIZE_AFTER_MIXED_ADMIN_COMPACT}K)"
 
 echo "=== SSHD_PUBKEY_ALGORITHMS-Override: RSA-Key (z.B. YubiKey/PIV) zusätzlich erlauben ==="
 ssh-keygen -q -t rsa -b 3072 -f "${WORKDIR}/admin_rsa" -C "admin-rsa" -N ""
 ssh-keygen -q -t ed25519 -f "${WORKDIR}/backup_client_rsatest" -C "backup-client-rsatest" -N ""
-mkdir -p "${WORKDIR}/users2/1500-rsaadmin/keys/admin" "${WORKDIR}/users2/1501-rsatest/keys/backup"
-cp "${WORKDIR}/admin_rsa.pub" "${WORKDIR}/users2/1500-rsaadmin/keys/admin/key1.pub"
+# Beide Keys derselben Identitaet "rsatest" - der RSA-Key ist ihr EIGENER
+# Admin-Key (nicht der einer fremden Identitaet), beschraenkt auf ihr
+# eigenes Repo wie jeder Admin-Key.
+mkdir -p "${WORKDIR}/users2/1501-rsatest/keys/backup" "${WORKDIR}/users2/1501-rsatest/keys/admin"
 cp "${WORKDIR}/backup_client_rsatest.pub" "${WORKDIR}/users2/1501-rsatest/keys/backup/key1.pub"
+cp "${WORKDIR}/admin_rsa.pub" "${WORKDIR}/users2/1501-rsatest/keys/admin/key1.pub"
 
 CONTAINER2=$(docker run -d \
     -p 127.0.0.1::22 \
@@ -347,11 +354,6 @@ CONTAINER2=$(docker run -d \
 PORT2=$(docker port "${CONTAINER2}" 22/tcp | head -n1 | cut -d: -f2)
 wait_for_sshd "${PORT2}"
 
-# /data/rsatest existiert erst NACHDEM build-authorized-keys.sh die
-# Identitaet "rsatest" verarbeitet hat (Registrierung, kein manuelles
-# "borg init" durch einen Admin direkt unter /data - das ist im neuen
-# Modell bewusst nicht mehr vorgesehen, jede Identitaet bekommt ihr
-# Datenverzeichnis ausschliesslich ueber users/<uid>-<name>/).
 RSATEST_RSH="ssh -p ${PORT2} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -o IdentitiesOnly=yes -i /work/backup_client_rsatest"
 BORG_REPO="ssh://rsatest@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSATEST_RSH}" borg init --encryption=repokey-blake2
 BORG_REPO="ssh://rsatest@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSATEST_RSH}" borg create ::functional-test /work/testfile.txt /work/bigfile.bin
@@ -359,15 +361,18 @@ BORG_REPO="ssh://rsatest@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSATEST_RS
 BORG_REPO="ssh://rsatest@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSATEST_RSH}" borg compact
 SIZE_BEFORE2=$(docker exec "${CONTAINER2}" du -sk /data/rsatest | cut -f1)
 
+# Gleicher SSH-Username "rsatest@..." wie oben - der RSA-Key liegt unter
+# authorized_keys/rsatest (gleiche Identitaet), nicht unter einem fremden
+# Account.
 RSA_RSH="ssh -p ${PORT2} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -o IdentitiesOnly=yes -i /work/admin_rsa"
-BORG_REPO="ssh://rsaadmin@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSA_RSH}" borg list
-BORG_REPO="ssh://rsaadmin@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSA_RSH}" borg compact
+BORG_REPO="ssh://rsatest@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSA_RSH}" borg list
+BORG_REPO="ssh://rsatest@127.0.0.1:${PORT2}/data/rsatest" BORG_RSH="${RSA_RSH}" borg compact
 SIZE_AFTER2=$(docker exec "${CONTAINER2}" du -sk /data/rsatest | cut -f1)
 if [ "${SIZE_AFTER2}" -ge "${SIZE_BEFORE2}" ]; then
     echo "FAIL: RSA-Admin-Key konnte /data/rsatest zwar lesen, aber 'compact' gab keinen Platz frei (${SIZE_BEFORE2}K -> ${SIZE_AFTER2}K)." >&2
     exit 1
 fi
-echo "OK (RSA-Key authentifiziert per Env-Override, kann fremdes Repo lesen UND compacten: ${SIZE_BEFORE2}K -> ${SIZE_AFTER2}K)"
+echo "OK (RSA-Key authentifiziert per Env-Override als eigener Admin-Key derselben Identitaet, kann das eigene Repo lesen UND compacten: ${SIZE_BEFORE2}K -> ${SIZE_AFTER2}K)"
 
 echo
 echo "Funktionstest erfolgreich: ${IMAGE}"

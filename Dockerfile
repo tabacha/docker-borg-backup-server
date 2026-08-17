@@ -99,19 +99,15 @@ RUN set -e \
 # sondern ueber "restrict" + "command=" pro Key in authorized_keys (siehe
 # build-authorized-keys.sh).
 #
-# Zwei Gruppen bleiben fest im Image, weil sie unabhaengig von einzelnen
-# Identitaeten sind:
-#   - borgusers: sshd's "AllowGroups" (sshd_config.template) - jeder
-#     dynamisch angelegte Account kommt rein, unabhaengig von der Rolle.
-#   - borgadmins: jeder Admin-Account kommt zusaetzlich rein. /data/<name>
-#     eines Backup-Clients gehoert Owner-seitig dem Client selbst, aber
-#     gruppenseitig "borgadmins" (Modus 770) - sonst koennte ein Admin-
-#     Forced-Command zwar per Borg-Protokoll "--restrict-to-path /data"
-#     anfragen, aber am Dateisystem selbst scheitern (der Admin-Unix-
-#     Account waere sonst ein voellig fremder User ohne jede Berechtigung
-#     auf dem privaten /data/<name> eines Clients).
+# Eine Gruppe bleibt fest im Image, weil sie unabhaengig von einzelnen
+# Identitaeten ist: borgusers ist sshd's "AllowGroups" (sshd_config.template)
+# - jeder dynamisch angelegte Account kommt rein, unabhaengig von der Rolle.
+# Absichtlich KEINE gruppenbasierte Cross-Account-Berechtigung (z.B. eine
+# "borgadmins"-Gruppe mit Zugriff auf jedes /data/<name>): jeder Account
+# soll ausschliesslich ueber Dateibesitz an sein EIGENES /data/<name>
+# kommen, nie ueber eine geteilte Gruppe an ein fremdes - siehe
+# build-authorized-keys.sh.
 RUN groupadd borgusers \
- && groupadd borgadmins \
  && mkdir -p /data /run/sshd \
  && chown root:root /data \
  && chmod 755 /data

@@ -71,17 +71,21 @@ Durchsetzung davon (Forced Commands, Isolation, Append-Only).
    du das lieber direkt (oder aus einem eigenen Skript heraus) pflegen
    willst, ganz ohne dieses Skript.
 
-5. **Optional: einen Admin-Key registrieren** (für `admin-compact.sh` /
-   `admin-shell.sh` aus `docker-borg-backup`, per Agent-Forwarding, NIE als
-   Datei ablegen):
+5. **Optional: einen Admin-Key für einen bestehenden Client registrieren**
+   (für `admin-compact.sh`/`admin-shell.sh` aus `docker-borg-backup`, per
+   Agent-Forwarding, NIE als Datei ablegen) — voller Zugriff
+   (`prune`/`delete`/`compact`), aber NUR auf das eine Repo dieses einen
+   Namens, nie auf ein fremdes:
 
    ```bash
-   ./add-admin-key.sh admin1 /pfad/zu/admin_key.pub
+   ./add-admin-key.sh toolsserver /pfad/zu/admin_key.pub
    ```
 
    Genau wie `add-backup-key.sh` nur ein Komfort-Wrapper um
-   `users/<uid>-<name>/keys/admin/<datei>.pub` — siehe
-   "Verzeichnisstruktur" unten.
+   `users/<uid>-<name>/keys/admin/<datei>.pub` — legt den Key unter
+   derselben Identität `toolsserver` ab (siehe "Verzeichnisstruktur"
+   unten). Soll dieselbe Person mehrere Client-Repos administrieren, den
+   Befehl mit dem jeweils anderen Namen wiederholen (`buchhaltung`, ...).
 
 6. **Docker-Volume + Image:**
 
@@ -146,17 +150,12 @@ users/
         laptop.version        # optional: feste Borg-Version fuer GENAU diesen Key
         laptop.from           # optional: "from="-Pattern (IP/CIDR), siehe unten
       admin/
-        alice.pub             # zusaetzliche Admin-Rolle fuer DIESELBE
-        bob.pub                # Identitaet, siehe "Sicherheitsmodell" unten
+        alice.pub             # volle Rechte (prune/delete/compact) auf
+        bob.pub                # GENAU dieses eine Repo, siehe "Sicherheitsmodell"
   1001-buchhaltung/
     keys/
       backup/
         key.pub
-  2000-admin1/
-    keys/
-      admin/
-        yubikey.pub
-        laptop.pub             # zweiter Key derselben Admin-Identitaet
 ```
 
 `<uid>` legt die UID fest, mit der der zugehörige Unix-Account angelegt
@@ -171,16 +170,6 @@ Mehrere `*.pub`-Dateien im selben `keys/backup/` bzw. `keys/admin/` sind
 mehrere gleichzeitig gültige Keys für **dieselbe** Identität — praktisch für
 Rotation (alten und neuen Key parallel eintragen, alten danach löschen)
 oder für einen Admin mit mehreren Geräten/Keys.
-
-Eine Identität kann `keys/backup/` UND `keys/admin/` gleichzeitig haben —
-z.B. ein Backup-Client, für dessen eigenes Repo zusätzlich eine feste Liste
-von Personen vollen Admin-Zugriff (`prune`/`delete`/`compact`) bekommen
-soll, ohne dafür eine zweite, separate Identität samt eigener UID
-anzulegen. `add-admin-key.sh <name-der-backup-identitaet> <adminkey.pub>`
-ergänzt die Admin-Keys dann einfach unter derselben `users/<uid>-<name>/`.
-`build-authorized-keys.sh` trägt in diesem Fall beide Forced Commands
-parallel in dieselbe `authorized_keys/<name>`-Datei ein — welches greift,
-entscheidet einzig, welcher der beiden Keys sich verbindet.
 
 Findet `build-authorized-keys.sh` dabei einen **harten Fehler** (z.B. eine
 doppelt vergebene UID oder eine UID außerhalb 1000–2000), wird **nichts**
@@ -199,26 +188,25 @@ was der Client anfragt.
 
 | Rolle | Forced Command | Bedeutung |
 |---|---|---|
-| Backup (`keys/backup/`) | `borg serve --append-only --restrict-to-repository /data/<name>` | Nur dieses eine Repo, nur anhängen — nichts endgültig löschen (siehe `docker-borg-backup`'s README "Sicherheit: zwei Schlüssel gegen Ransomware"). `--restrict-to-repository` erlaubt exakt diesen einen Pfad, keine Unterverzeichnisse. |
-| Admin (`keys/admin/`) | `borg serve --restrict-to-path /data` | Voller Zugriff (`prune`/`delete`/`compact`) auf jedes Repo unter `/data` — `--restrict-to-path` erlaubt (im Unterschied zu `--restrict-to-repository`) Unterverzeichnisse. Trotzdem kein Ausbruch aus `/data`, keine Shell. |
+| Backup (`keys/backup/`) | `borg serve --append-only --restrict-to-repository /data/<name>` | Nur dieses eine Repo, nur anhängen — nichts endgültig löschen (siehe `docker-borg-backup`'s README "Sicherheit: zwei Schlüssel gegen Ransomware"). |
+| Admin (`keys/admin/`) | `borg serve --restrict-to-repository /data/<name>` | Voller Zugriff (`prune`/`delete`/`compact`) — aber, genau wie beim Backup-Key, nur auf dieses eine Repo. Ein Admin-Key erreicht nie ein fremdes Repo einer anderen Identität. |
 
-Die Rolle hängt am einzelnen **Key** (welches Verzeichnis er in liegt), nicht
-an der Identität — eine Identität kann also Keys in `keys/backup/` UND
-`keys/admin/` gleichzeitig haben und bekommt dann beide Forced Commands,
-je nachdem, mit welchem der beiden Keys sich jemand verbindet.
+`--restrict-to-repository` erlaubt exakt den angegebenen Pfad, keine
+Unterverzeichnisse — es gibt keine Möglichkeit, mit einem einzelnen Key
+mehrere Repos zu verwalten. Soll dieselbe Person mehrere Kunden-Repos
+administrieren, wird ihr Pubkey einfach mehrfach registriert, einmal je
+Ziel-Identität (`add-admin-key.sh <name> <derselbe-pubkey>`).
 
-**Isolation zwischen Backup-Clients ist doppelt abgesichert, nicht nur
+**Isolation zwischen Identitäten ist doppelt abgesichert, nicht nur
 einfach:** Zum einen verhindert `--restrict-to-repository` auf
-SSH/Borg-Protokoll-Ebene, dass ein Backup-Key auf ein fremdes Repo
-zugreift. Zum anderen gehört `/data/<name>` auch auf **Dateisystemebene**
-exklusiv dem jeweiligen Unix-Account (Modus 700) — selbst ein
-kompromittierter `borg serve`-Prozess eines Clients (Bug in Borg selbst
-oder in der Forced-Command-Durchsetzung) käme an kein fremdes Repo heran,
-weil ihm dafür schlicht die Unix-Rechte fehlen. Admin-Accounts sind
-zusätzlich Mitglied der Gruppe `borgadmins`, die auf jedem `/data/<name>`
-Lese-/Schreibrechte hat (Setgid + `--umask 0007`, damit auch neu
-angelegte Dateien gruppen-zugreifbar bleiben) — nur so kann
-`--restrict-to-path /data` überhaupt eingelöst werden.
+SSH/Borg-Protokoll-Ebene, dass ein Key auf ein fremdes Repo zugreift. Zum
+anderen gehört `/data/<name>` auch auf **Dateisystemebene** exklusiv dem
+jeweiligen Unix-Account (Modus 700, keine Gruppe) — selbst ein
+kompromittierter `borg serve`-Prozess (Bug in Borg selbst oder in der
+Forced-Command-Durchsetzung) käme an kein fremdes Repo heran, weil ihm
+dafür schlicht die Unix-Rechte fehlen. Bewusst KEINE gruppenbasierte
+Cross-Account-Berechtigung: kein Account soll je über Dateibesitz an ein
+fremdes Repo kommen, egal ob Backup- oder Admin-Rolle.
 
 Der Witz an Append-Only: `borg delete`/`borg prune` mit dem Backup-Key
 laufen durch (Exit 0), hinterlassen aber nur einen Löschvermerk. `borg

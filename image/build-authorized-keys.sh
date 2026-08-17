@@ -161,16 +161,12 @@ apply_all() {
     chown root:root "${AUTH_KEYS_DIR}"
     chmod 755 "${AUTH_KEYS_DIR}"
 
-    local name uid_num role home_dir tmp_file has_backup has_admin
+    local name uid_num role home_dir tmp_file
 
     for name in "${!UID_OF_NAME[@]}"; do
         uid_num="${UID_OF_NAME[${name}]}"
         role="${ROLE_OF_NAME[${name}]}"
         home_dir="${DATA_DIR}/${name}"
-        has_backup=""
-        has_admin=""
-        [ -n "${BACKUP_PUBFILES_OF_NAME[${name}]:-}" ] && has_backup=1
-        [ -n "${ADMIN_PUBFILES_OF_NAME[${name}]:-}" ] && has_admin=1
 
         if ! id "${name}" >/dev/null 2>&1; then
             useradd --no-create-home --home-dir "${home_dir}" --uid "${uid_num}" \
@@ -180,39 +176,22 @@ apply_all() {
             # falls UsePAM je wieder aktiviert wird, siehe sshd_config.template.
             usermod -p '*' "${name}"
         fi
-        # -aG statt einmalig bei useradd: eine Identitaet, die ERST spaeter
-        # (nach dem initialen useradd) einen Admin-Key dazubekommt, braucht
-        # die Gruppenmitgliedschaft trotzdem - "if ! id" oben laeuft dann
-        # nicht mehr. -aG ist idempotent, kostet bei einem frischen Account
-        # nichts zusaetzlich. Kein automatisches Entfernen aus borgadmins bei
-        # Verlust der Admin-Rolle - passt zur "Entzug loescht nie"-Linie
-        # dieses Skripts, siehe CLAUDE.md.
-        [ -n "${has_admin}" ] && usermod -aG borgadmins "${name}"
 
+        # /data/<name> gehoert IMMER exklusiv dem eigenen Account (700) -
+        # keine Gruppe, kein Setgid: kein Account soll je ueber Datei-
+        # besitz an ein fremdes Repo kommen. Ein Admin-Key (unten) bekommt
+        # deshalb bewusst NIE mehr Zugriff als der Backup-Key derselben
+        # Identitaet - beide restrict-to-repository auf GENAU diesen
+        # einen Pfad, nur ohne dessen --append-only.
         mkdir -p "${home_dir}"
-        if [ -n "${has_backup}" ]; then
-            # Gruppe "borgadmins" (statt privater Client-Gruppe) + Setgid
-            # (2770): Admins brauchen Zugriff auf JEDES /data/<name>, und
-            # neue Dateien darin muessen die Verzeichnisgruppe erben, sonst
-            # bleiben sie trotz gruppen-lesbarem Verzeichnis unerreichbar.
-            # Siehe CLAUDE.md fuer die volle Herleitung inkl. --umask unten.
-            # Gilt genauso, wenn dieselbe Identitaet zusaetzlich eigene
-            # Admin-Keys hat (role "backup+admin") - es bleibt IHR Repo.
-            chown "${name}:borgadmins" "${home_dir}"
-            chmod 2770 "${home_dir}"
-        else
-            chown "${name}:${name}" "${home_dir}"
-            chmod 700 "${home_dir}"
-        fi
+        chown "${name}:${name}" "${home_dir}"
+        chmod 700 "${home_dir}"
 
         tmp_file="$(mktemp "${AUTH_KEYS_DIR}/.${name}.XXXXXX")"
-        # --umask 0007 statt Borgs Default 0077, sonst wuerden Gruppen-Bits
-        # bei jeder neuen Datei sofort wieder verschwinden (macht das
-        # Setgid oben erst wirksam).
-        [ -n "${has_backup}" ] && append_key_lines "${BACKUP_PUBFILES_OF_NAME[${name}]}" \
-            "--umask 0007 serve --append-only --restrict-to-repository ${home_dir}" "${tmp_file}"
-        [ -n "${has_admin}" ] && append_key_lines "${ADMIN_PUBFILES_OF_NAME[${name}]}" \
-            "--umask 0007 serve --restrict-to-path ${DATA_DIR}" "${tmp_file}"
+        [ -n "${BACKUP_PUBFILES_OF_NAME[${name}]:-}" ] && append_key_lines "${BACKUP_PUBFILES_OF_NAME[${name}]}" \
+            "serve --append-only --restrict-to-repository ${home_dir}" "${tmp_file}"
+        [ -n "${ADMIN_PUBFILES_OF_NAME[${name}]:-}" ] && append_key_lines "${ADMIN_PUBFILES_OF_NAME[${name}]}" \
+            "serve --restrict-to-repository ${home_dir}" "${tmp_file}"
 
         chown root:root "${tmp_file}"
         # 644, nicht 600: sshd liest eine authorized_keys-Datei ausserhalb
