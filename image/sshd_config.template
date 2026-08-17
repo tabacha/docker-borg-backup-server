@@ -81,12 +81,12 @@ PermitUserEnvironment no
 # angelegten User (der ohne -p ein gesperrtes Passwort hat) ablehnen.
 UsePAM no
 
-# Kein "AllowUsers borg" mehr - Identitaeten werden dynamisch angelegt
-# (siehe build-authorized-keys.sh), eine feste Namensliste ginge hier nicht.
-# Stattdessen eine gemeinsame Gruppe, in die JEDER dynamisch angelegte
-# Account kommt (Backup- wie Admin-Rolle) - reiner Fallback-Riegel, falls
-# aus irgendeinem Grund je ein Account existiert, der nicht ueber
-# build-authorized-keys.sh entstanden ist.
+# Identitaeten werden dynamisch angelegt (siehe build-authorized-keys.sh),
+# eine feste Namensliste per "AllowUsers" ginge deshalb nicht. Stattdessen
+# eine gemeinsame Gruppe, in die JEDER dynamisch angelegte Account kommt
+# (Backup- wie Admin-Rolle) - reiner Fallback-Riegel, falls aus irgendeinem
+# Grund je ein Account existiert, der nicht ueber build-authorized-keys.sh
+# entstanden ist.
 AllowGroups borgusers
 
 # Kein natives sshd_config-Aequivalent zu "nur UID 1000-2000 duerfen sich

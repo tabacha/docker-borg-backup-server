@@ -85,22 +85,22 @@ RUN set -e \
  && ln -s "/usr/local/bin/borg-${BORG_DEFAULT_VERSION}" /usr/local/bin/borg \
  && borg --version
 
-# Kein statischer "borg"-User mehr im Image: jede Backup-/Admin-Identitaet
-# bekommt ihren eigenen Unix-Account, dynamisch von build-authorized-keys.sh
-# beim Container-Start (und bei jedem reload-keys.sh) angelegt, mit einer
-# fest in /users/<uid>-<name> vorgegebenen UID (siehe dort - Begruendung:
-# /data ist ein persistentes Volume, eine bei jedem Neustart neu vergebene
-# UID wuerde die Ownership-Zuordnung zerreissen). "useradd" hier im Image
-# waere vor dem ersten echten Start ohnehin nur geraten. Jeder so angelegte
-# Account bekommt echte Shell (kein /usr/sbin/nologin!) - sshd fuehrt Forced
-# Commands aus authorized_keys ueber die Login-Shell aus, "nologin" wuerde
-# also auch das erzwungene "borg serve" verhindern, nicht nur einen
-# interaktiven Login. Die eigentliche Einschraenkung passiert nicht ueber
-# die Shell, sondern ueber "restrict" + "command=" pro Key in
-# authorized_keys (siehe build-authorized-keys.sh).
+# Jede Backup-/Admin-Identitaet bekommt ihren eigenen Unix-Account,
+# dynamisch von build-authorized-keys.sh beim Container-Start (und bei
+# jedem reload-keys.sh) angelegt, mit einer fest in /users/<uid>-<name>
+# vorgegebenen UID (siehe dort - Begruendung: /data ist ein persistentes
+# Volume, eine bei jedem Neustart neu vergebene UID wuerde die Ownership-
+# Zuordnung zerreissen). "useradd" hier im Image waere vor dem ersten
+# echten Start ohnehin nur geraten. Jeder so angelegte Account bekommt
+# echte Shell (kein /usr/sbin/nologin!) - sshd fuehrt Forced Commands aus
+# authorized_keys ueber die Login-Shell aus, "nologin" wuerde also auch
+# das erzwungene "borg serve" verhindern, nicht nur einen interaktiven
+# Login. Die eigentliche Einschraenkung passiert nicht ueber die Shell,
+# sondern ueber "restrict" + "command=" pro Key in authorized_keys (siehe
+# build-authorized-keys.sh).
 #
-# Zwei Gruppen bleiben trotzdem fest im Image, weil sie unabhaengig von
-# einzelnen Identitaeten sind:
+# Zwei Gruppen bleiben fest im Image, weil sie unabhaengig von einzelnen
+# Identitaeten sind:
 #   - borgusers: sshd's "AllowGroups" (sshd_config.template) - jeder
 #     dynamisch angelegte Account kommt rein, unabhaengig von der Rolle.
 #   - borgadmins: jeder Admin-Account kommt zusaetzlich rein. /data/<name>
