@@ -9,15 +9,20 @@
 # kein Signal an sshd noetig, und bereits laufende Sessions sind davon nicht
 # betroffen (siehe build-authorized-keys.sh).
 #
-# Nach dem Anlegen/Loeschen einer Datei unter keys/backup/ bzw. keys/admin/
-# (z.B. add-backup-key.sh oder manuell "rm keys/backup/<name>.pub"):
+# Nach dem Anlegen/Loeschen einer Datei unter users/<uid>-<name>/keys/
+# (z.B. add-backup-key.sh oder manuell "rm users/1000-toolsserver/keys/backup/*.pub"):
 #
 #   ./reload-keys.sh
 #
 # add-backup-key.sh/add-admin-key.sh rufen das am Ende automatisch mit auf -
 # laeuft der Container noch nicht (z.B. bei der Ersteinrichtung, vor dem
 # ersten "docker compose up -d"), ist das kein Fehler: der naechste Start
-# baut authorized_keys ohnehin frisch aus dem aktuellen Inhalt von keys/.
+# baut authorized_keys ohnehin frisch aus dem aktuellen Inhalt von users/.
+#
+# Enthaelt users/ einen harten Fehler (siehe build-authorized-keys.sh, z.B.
+# eine doppelt vergebene UID), bricht dieser Aufruf mit einem entsprechenden
+# Fehler ab - der bisherige Stand im Container bleibt dabei vollstaendig
+# unangetastet, es wird NICHTS Halbfertiges uebernommen.
 #
 # Fuer SSHD_PUBKEY_ALGORITHMS/SSHD_KEX_ALGORITHMS/SSHD_CIPHERS/SSHD_MACS in
 # der .env reicht das NICHT - die werden nur beim Container-Erstellen

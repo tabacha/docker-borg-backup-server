@@ -12,22 +12,20 @@ services:
       - "${SSH_PORT:-2222}:22"
 
     environment:
-      # Alle vier optional - unbelegt kommen die engen Defaults aus
+      # Alle optional - unbelegt kommen die engen Defaults aus
       # sshd_config.template zum Einsatz. Siehe README "SSH-Haertung".
       SSHD_PUBKEY_ALGORITHMS: "${SSHD_PUBKEY_ALGORITHMS:-}"
       SSHD_KEX_ALGORITHMS: "${SSHD_KEX_ALGORITHMS:-}"
       SSHD_CIPHERS: "${SSHD_CIPHERS:-}"
       SSHD_MACS: "${SSHD_MACS:-}"
+      SSHD_MAX_AUTH_TRIES: "${SSHD_MAX_AUTH_TRIES:-}"
 
     volumes:
       - borg-data:/data
       - ./secrets/ssh_host_ed25519_key:/etc/ssh/ssh_host_ed25519_key:ro
-      - ./keys/backup:/keys/backup:ro
-      - ./keys/admin:/keys/admin:ro
-      # Optionaler zweiter Modus: liegt hier eine Datei "authorized_keys",
-      # wird die 1:1 uebernommen und keys/backup/+keys/admin/ ignoriert -
-      # siehe README "Manueller Modus".
-      - ./keys/manual:/keys/manual:ro
+      # Eine Identitaet (Backup-Client oder Admin) pro
+      # users/<uid>-<name>/ - siehe README "Verzeichnisstruktur".
+      - ./users:/users:ro
 
 volumes:
   borg-data:

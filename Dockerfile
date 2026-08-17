@@ -85,23 +85,36 @@ RUN set -e \
  && ln -s "/usr/local/bin/borg-${BORG_DEFAULT_VERSION}" /usr/local/bin/borg \
  && borg --version
 
-# "borg" ist ein normaler User mit echter Shell (kein /usr/sbin/nologin!) -
-# sshd fuehrt Forced Commands aus authorized_keys ueber die Login-Shell des
-# Users aus, "nologin" wuerde also auch den erzwungenen "borg serve"-Aufruf
-# verhindern, nicht nur einen interaktiven Login. Die eigentliche
-# Einschraenkung passiert nicht ueber die Shell, sondern ueber "restrict" +
-# "command=" pro Key in authorized_keys (siehe build-authorized-keys.sh).
+# Kein statischer "borg"-User mehr im Image: jede Backup-/Admin-Identitaet
+# bekommt ihren eigenen Unix-Account, dynamisch von build-authorized-keys.sh
+# beim Container-Start (und bei jedem reload-keys.sh) angelegt, mit einer
+# fest in /users/<uid>-<name> vorgegebenen UID (siehe dort - Begruendung:
+# /data ist ein persistentes Volume, eine bei jedem Neustart neu vergebene
+# UID wuerde die Ownership-Zuordnung zerreissen). "useradd" hier im Image
+# waere vor dem ersten echten Start ohnehin nur geraten. Jeder so angelegte
+# Account bekommt echte Shell (kein /usr/sbin/nologin!) - sshd fuehrt Forced
+# Commands aus authorized_keys ueber die Login-Shell aus, "nologin" wuerde
+# also auch das erzwungene "borg serve" verhindern, nicht nur einen
+# interaktiven Login. Die eigentliche Einschraenkung passiert nicht ueber
+# die Shell, sondern ueber "restrict" + "command=" pro Key in
+# authorized_keys (siehe build-authorized-keys.sh).
 #
-# usermod -p '*': useradd legt den Account ohne -p standardmaessig mit
-# gesperrtem Passwort-Hash ("!") an. Selbst bei reiner Pubkey-Auth prueft
-# sshd (UsePAM yes, Default) per PAM zusaetzlich den Account-Status und
-# verweigert dann mit "account is locked" - "*" ist ein Hash, der nie
-# matcht, aber PAM nicht als gesperrt gilt.
-RUN useradd --create-home --shell /bin/bash borg \
- && usermod -p '*' borg \
- && mkdir -p /home/borg/.ssh /data /run/sshd \
- && chmod 700 /home/borg/.ssh \
- && chown borg:borg /home/borg/.ssh /data
+# Zwei Gruppen bleiben trotzdem fest im Image, weil sie unabhaengig von
+# einzelnen Identitaeten sind:
+#   - borgusers: sshd's "AllowGroups" (sshd_config.template) - jeder
+#     dynamisch angelegte Account kommt rein, unabhaengig von der Rolle.
+#   - borgadmins: jeder Admin-Account kommt zusaetzlich rein. /data/<name>
+#     eines Backup-Clients gehoert Owner-seitig dem Client selbst, aber
+#     gruppenseitig "borgadmins" (Modus 770) - sonst koennte ein Admin-
+#     Forced-Command zwar per Borg-Protokoll "--restrict-to-path /data"
+#     anfragen, aber am Dateisystem selbst scheitern (der Admin-Unix-
+#     Account waere sonst ein voellig fremder User ohne jede Berechtigung
+#     auf dem privaten /data/<name> eines Clients).
+RUN groupadd borgusers \
+ && groupadd borgadmins \
+ && mkdir -p /data /run/sshd \
+ && chown root:root /data \
+ && chmod 755 /data
 
 COPY sshd_config.template /etc/ssh/sshd_config.template
 COPY build-authorized-keys.sh /usr/local/bin/build-authorized-keys.sh
