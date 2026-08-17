@@ -18,8 +18,8 @@ prüft, nicht nur "Verbindung klappt":
 
 ```bash
 # Shell-Syntax + Lint:
-bash -n *.sh .github/scripts/*.sh
-shellcheck --severity=warning -- *.sh .github/scripts/*.sh
+bash -n *.sh image/*.sh .github/scripts/*.sh
+shellcheck --severity=warning -- *.sh image/*.sh .github/scripts/*.sh
 
 # Dockerfile-Lint (Konfiguration in .hadolint.yaml, DL3008 ist bewusst
 # ignoriert - siehe Kommentar dort). Ohne gemountete Config meldet hadolint
@@ -69,6 +69,28 @@ Zwei Workflows unter `.github/workflows/`, analog zu `docker-borg-backup`:
   Damit `docker compose pull` ohne Login funktioniert, muss das GHCR-Package
   einmalig auf **Public** gestellt werden (Package Settings → Change
   visibility → Public) — dieselbe Falle wie bei `docker-borg-backup`.
+
+## `image/` — Docker-Image-Interna
+
+Alles unter `image/` wird nur beim Bau ins Image kopiert (`Dockerfile`s
+`COPY image/... `) und läuft ausschließlich *im* Container — nichts davon
+wird vom Betreiber des Servers je direkt aufgerufen (das steht so auch in
+der README, hier nur mit Details für die Bearbeitung selbst). Das
+`Dockerfile` selbst bleibt bewusst im Repo-Root (Konvention, `docker build
+.` erwartet es dort per Default, `compose.yml`s `build: .` ebenso).
+
+| Pfad | Läuft wann/wie | Zweck |
+|---|---|---|
+| `image/sshd_config.template` | Wird von `entrypoint.sh` bei JEDEM Container-Start gerendert (nicht beim Image-Bau) | Minimal-Config: nur Pubkey-Auth, kein PAM, kein Shell-Zugriff für irgendeine Identität. Fünf `__PLATZHALTER__` werden per `sed` durch `SSHD_*`-Env-Werte ersetzt (Default falls unset). |
+| `image/entrypoint.sh` | `ENTRYPOINT` des Containers, läuft einmal pro Container-Start | Rendert `sshd_config`, leitet den Hostkey-Public-Part vom read-only gemounteten privaten Key ab, ruft `build-authorized-keys.sh` auf, startet `sshd -D -e`. |
+| `image/build-authorized-keys.sh` | Von `entrypoint.sh` bei jedem Start UND von `reload-keys.sh` (per `docker compose exec`) bei Bedarf im laufenden Container | Liest `/users/<uid>-<name>/keys/{backup,admin}/*.pub`, legt Unix-Accounts + `/data/<name>` an, schreibt `/etc/ssh/authorized_keys/<name>`. Zwei Phasen (`validate_all()`/`apply_all()`) - bei irgendeinem harten Fehler wird nichts angewendet, siehe Kommentare im Skript. |
+
+Wer an diesen drei Dateien etwas ändert: Image neu bauen
+(`docker build -t ci-test:local .`) und danach den kompletten
+`functional-test.sh`-Lauf (siehe "Lokal testen" oben) - das ist der
+einzige verlässliche Weg, Änderungen hier zu verifizieren, da vieles davon
+nur zur Laufzeit im Container sichtbar wird (z.B. ob `sshd -t` den
+gerenderten Output noch akzeptiert).
 
 ## Sonstiges (intern)
 

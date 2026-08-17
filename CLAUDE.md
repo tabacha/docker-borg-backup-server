@@ -75,6 +75,14 @@ Wichtige, beim Debuggen schon aufgetretene Stolperfallen:
 
 ## Architecture
 
+`image/` enthält reine Docker-Image-Interna (`sshd_config.template`,
+`entrypoint.sh`, `build-authorized-keys.sh`) - werden nur per `COPY` ins
+Image kopiert und laufen ausschließlich *im* Container, nie direkt vom
+Host aus aufgerufen. Alle anderen Skripte im Repo-Root
+(`add-backup-key.sh`, `add-admin-key.sh`, `reload-keys.sh`,
+`setup-secrets.sh`) laufen auf dem Host. Das `Dockerfile` selbst bleibt
+bewusst im Root (Konvention, `docker build .` erwartet es dort).
+
 ### SSH-Kryptografie eng eingeschränkt, per Env überschreibbar, empirisch verifiziert
 
 `sshd_config.template` ist kein fertiges Config-File, sondern hat fünf

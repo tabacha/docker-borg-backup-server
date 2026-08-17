@@ -17,7 +17,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck --severity=warning -- *.sh .github/scripts/*.sh
+          shellcheck --severity=warning -- *.sh image/*.sh .github/scripts/*.sh
 
       - name: hadolint
         uses: hadolint/hadolint-action@v3.4.0

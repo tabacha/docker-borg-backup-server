@@ -99,13 +99,17 @@ Durchsetzung davon (Forced Commands, Isolation, Append-Only).
 
 ## Verzeichnisstruktur
 
+Was du als Betreiber dieses Servers tatsächlich anfasst, läuft auf dem
+**Host**: die Skripte im Root plus `compose.yml`/`.env`. `image/` enthält
+reine Docker-Image-Interna, die nur beim Bau ins Image kopiert werden und
+ausschließlich *im* Container laufen — du rufst sie nie selbst auf, daher
+hier nur der Vollständigkeit halber erwähnt; Details dazu in
+[DEVELOPMENT.md](DEVELOPMENT.md).
+
 | Pfad                      | Zweck                                                              |
 |-----------------------------|--------------------------------------------------------------------|
 | `Dockerfile`                | Zweistufiger Build: Builder-Stage kompiliert Borg in venvs, Runtime-Stage (`openssh-server` + nur Laufzeit-Bibliotheken) enthält keinen Compiler/Header mehr. |
-| `sshd_config.template`       | Minimal-Config: nur Pubkey-Auth, kein PAM, kein Shell-Zugriff für irgendeine Identität. Krypto-Platzhalter, siehe "SSH-Härtung". |
 | `compose.yml`                | Ein Service `borg-server`. Image kommt vorgebaut von GHCR, `build: .` ist Fallback. |
-| `entrypoint.sh`              | Rendert `sshd_config` aus dem Template, baut beim Start alle Accounts/Zugänge, leitet den Hostkey-Public-Part ab, startet `sshd`. |
-| `build-authorized-keys.sh`   | Erzeugt aus `users/<uid>-<name>/keys/{backup,admin}/*.pub` je Identität einen Unix-Account, ein `/data/<name>` und eine `authorized_keys`-Datei mit passendem Forced Command. Läuft beim Start UND bei Bedarf erneut im laufenden Container, siehe `reload-keys.sh`. |
 | `setup-secrets.sh`           | Erzeugt einmalig `secrets/ssh_host_ed25519_key` (idempotent). |
 | `add-backup-key.sh`          | **Komfort-Wrapper**, keine eigene Datenquelle: legt `users/<uid>-<name>/keys/backup/<datei>.pub` an und ruft danach `reload-keys.sh`. `./add-backup-key.sh <name> <pubkey-datei>`. |
 | `add-admin-key.sh`           | **Komfort-Wrapper**, analog für `users/<uid>-<name>/keys/admin/`. `./add-admin-key.sh <name> <pubkey-datei>`. |
@@ -113,7 +117,8 @@ Durchsetzung davon (Forced Commands, Isolation, Append-Only).
 | `.env` / `.env.example`      | `SSH_PORT`, optionale `SSHD_*`-Overrides. |
 | `secrets/`                   | SSH-Hostkey dieses Servers. Pro Deployment eigen, nicht committen. |
 | `users/`                     | **Die eigentliche, dauerhafte Konfiguration** dieses Servers — eine Identität pro `users/<uid>-<name>/` (Backup-Client oder Admin), siehe unten. Alles, was per Bind-Mount in den Container geht (neben `secrets/`). Pro Deployment eigen, nicht committen. |
-| `DEVELOPMENT.md`             | Für Mitarbeit am Repo selbst: lokale Checks, CI/Release-Pipeline. |
+| `image/`                     | Docker-Image-Interna (sshd-Config-Template, Entrypoint, Account-/Key-Erzeugung im Container) — siehe [DEVELOPMENT.md](DEVELOPMENT.md). |
+| `DEVELOPMENT.md`             | Für Mitarbeit am Repo selbst: lokale Checks, CI/Release-Pipeline, Details zu `image/`. |
 
 ### `users/<uid>-<name>/` — eine Identität pro Verzeichnis
 

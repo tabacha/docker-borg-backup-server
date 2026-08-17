@@ -116,9 +116,9 @@ RUN groupadd borgusers \
  && chown root:root /data \
  && chmod 755 /data
 
-COPY sshd_config.template /etc/ssh/sshd_config.template
-COPY build-authorized-keys.sh /usr/local/bin/build-authorized-keys.sh
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY image/sshd_config.template /etc/ssh/sshd_config.template
+COPY image/build-authorized-keys.sh /usr/local/bin/build-authorized-keys.sh
+COPY image/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/build-authorized-keys.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 22
