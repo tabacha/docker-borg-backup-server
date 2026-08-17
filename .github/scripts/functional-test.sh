@@ -18,6 +18,10 @@
 #     zu behaupten.
 #   - Mehrere Keys für dieselbe Identität (Rotation) sind gleichzeitig
 #     gültig.
+#   - Eine Identität mit Keys sowohl unter keys/backup/ als auch keys/admin/
+#     bekommt beide Forced Commands parallel - ihr Backup-Key bleibt trotzdem
+#     auf restrict-to-repository beschränkt, ihr Admin-Key erreicht (wie ein
+#     separater Admin-Account) jedes Repo unter /data.
 #   - Ein Key mit eigener <key>.version-Datei benutzt wirklich die dort
 #     angegebene Borg-Version.
 #   - SSHD_PUBKEY_ALGORITHMS als Env-Override erlaubt wirklich einen
@@ -284,6 +288,48 @@ if [ "${SIZE_AFTER_ADMIN_COMPACT}" -ge "${SIZE_AFTER_BACKUP_COMPACT}" ]; then
     exit 1
 fi
 echo "OK (Repo geschrumpft: ${SIZE_AFTER_BACKUP_COMPACT}K -> ${SIZE_AFTER_ADMIN_COMPACT}K)"
+
+echo "=== Gemischte Rolle: 'testclient' bekommt zusätzlich einen eigenen Admin-Key ==="
+ssh-keygen -q -t ed25519 -f "${WORKDIR}/testclient_admin" -C "testclient-admin" -N ""
+mkdir -p "${WORKDIR}/users/1000-testclient/keys/admin"
+cp "${WORKDIR}/testclient_admin.pub" "${WORKDIR}/users/1000-testclient/keys/admin/key1.pub"
+docker exec "${CONTAINER}" /usr/local/bin/build-authorized-keys.sh >/dev/null
+
+if ! docker exec "${CONTAINER}" grep -qF "restrict-to-path /data" /etc/ssh/authorized_keys/testclient; then
+    echo "FAIL: authorized_keys/testclient bekam nach Hinzufügen eines Admin-Keys kein restrict-to-path." >&2
+    docker exec "${CONTAINER}" cat /etc/ssh/authorized_keys/testclient >&2
+    exit 1
+fi
+if ! docker exec "${CONTAINER}" grep -qF "restrict-to-repository /data/testclient" /etc/ssh/authorized_keys/testclient; then
+    echo "FAIL: authorized_keys/testclient hat den ursprünglichen Backup-Eintrag (restrict-to-repository) verloren." >&2
+    docker exec "${CONTAINER}" cat /etc/ssh/authorized_keys/testclient >&2
+    exit 1
+fi
+echo "OK (beide Forced Commands stehen parallel in derselben authorized_keys-Datei)"
+
+TESTCLIENT_ADMIN_RSH="ssh ${CONTAINER_SSH_OPTS} -i /work/testclient_admin"
+# SSH-Username in der Repo-URL bestimmt, WESSEN authorized_keys sshd prüft -
+# der neue Admin-Key liegt unter authorized_keys/testclient (gleiche
+# Identität wie der Backup-Key), also muss die URL "testclient@" sein,
+# auch wenn der Pfad auf ein fremdes Repo (/data/otherclient) zeigt.
+TESTCLIENT_AS_ADMIN_REPO="ssh://testclient@127.0.0.1:${PORT}/data/otherclient"
+
+echo "=== ... der neue Admin-Key von 'testclient' erreicht damit auch ein FREMDES Repo (/data/otherclient) ==="
+BORG_REPO="${TESTCLIENT_AS_ADMIN_REPO}" BORG_RSH="${TESTCLIENT_ADMIN_RSH}" borg list
+echo "OK (voller Admin-Zugriff trotz gleichzeitiger Backup-Rolle derselben Identität)"
+
+echo "=== ... während der ursprüngliche Backup-Key derselben Identität (per --restrict-to-repository) weiterhin NUR sein eigenes Repo erreicht ==="
+# Bewusst mit korrektem Nutzernamen "testclient@..." (Auth klappt also), nur
+# der Pfad zeigt auf ein fremdes Repo - zeigt, dass --restrict-to-repository
+# selbst bei richtiger Identitaet/richtigem Key exakt einschraenkt, nicht nur
+# der SSH-Username/Unix-Account die Trennung leistet.
+TESTCLIENT_FOREIGN_REPO="ssh://testclient@127.0.0.1:${PORT}/data/otherclient"
+if BORG_REPO="${TESTCLIENT_FOREIGN_REPO}" borg list >"${WORKDIR}/mixed-backup-out" 2>&1; then
+    echo "FAIL: Backup-Key von 'testclient' konnte trotz --restrict-to-repository über die eigene Identität ein fremdes Repo (/data/otherclient) erreichen." >&2
+    cat "${WORKDIR}/mixed-backup-out" >&2
+    exit 1
+fi
+echo "OK (Backup-Key bleibt trotz zusätzlicher Admin-Rolle derselben Identität exakt auf /data/testclient beschränkt)"
 
 echo "=== SSHD_PUBKEY_ALGORITHMS-Override: RSA-Key (z.B. YubiKey/PIV) zusätzlich erlauben ==="
 ssh-keygen -q -t rsa -b 3072 -f "${WORKDIR}/admin_rsa" -C "admin-rsa" -N ""

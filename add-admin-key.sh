@@ -14,7 +14,9 @@ Usage: add-admin-key.sh <name> <pubkey-datei> [--uid N] [--version V] [--from PA
 Legt users/<uid>-<name>/keys/admin/<datei>.pub an und ruft reload-keys.sh -
 voller Zugriff (prune/delete/compact) auf jedes Repo unter /data. Existiert
 <name> schon, wird der Key als zusaetzlicher Key derselben Identitaet
-ergaenzt (mehrere Admins/Geraete/Rotation).
+ergaenzt (mehrere Admins/Geraete/Rotation). Ist <name> schon eine
+Backup-Identitaet, bekommt sie zusaetzlich die Admin-Rolle - beide Forced
+Commands gelten dann parallel fuer diese eine Identitaet.
 
   --uid N         feste UID fuer eine neue Identitaet (sonst automatisch,
                    Bereich 1000-2000)
@@ -79,9 +81,14 @@ if [ "${ACCEPTED}" -eq 0 ]; then
     echo "mit 'Permission denied (publickey)' scheitern, siehe README 'SSH-Haertung'." >&2
 fi
 
+# Existierende Identitaet mit demselben Namen wiederverwenden statt eine
+# zweite anzulegen. Hat sie schon Backup-Keys, bekommt sie damit zusaetzlich
+# zur Backup- auch die Admin-Rolle (voller Zugriff auf GENAU ihr eigenes
+# Repo, wie auf jedes andere unter /data) - build-authorized-keys.sh traegt
+# beide Forced Commands parallel ein, siehe CLAUDE.md.
 EXISTING_DIR=""
 EXISTING_UID=""
-EXISTING_ROLE=""
+EXISTING_HAS_BACKUP=""
 for entry in "${USERS_DIR}"/*/; do
     [ -d "${entry}" ] || continue
     base="$(basename "${entry}")"
@@ -90,15 +97,15 @@ for entry in "${USERS_DIR}"/*/; do
         EXISTING_DIR="${entry}"
         EXISTING_UID="${BASH_REMATCH[1]}"
         if [ -n "$(compgen -G "${entry}keys/backup/*.pub")" ]; then
-            EXISTING_ROLE="backup"
+            EXISTING_HAS_BACKUP=1
         fi
         break
     fi
 done
 
-if [ -n "${EXISTING_ROLE}" ]; then
-    echo "ERROR: '${NAME}' ist schon als Backup-Identitaet registriert (${EXISTING_DIR}keys/backup/) - kann nicht gleichzeitig Admin-Rolle bekommen." >&2
-    exit 1
+if [ -n "${EXISTING_HAS_BACKUP}" ]; then
+    echo "Hinweis: '${NAME}' ist schon als Backup-Identitaet registriert (${EXISTING_DIR}keys/backup/) -"
+    echo "bekommt zusaetzlich die Admin-Rolle fuer ihr eigenes UND jedes andere Repo unter /data."
 fi
 
 if [ -n "${EXISTING_DIR}" ]; then

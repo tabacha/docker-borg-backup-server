@@ -24,7 +24,8 @@ shopt -s nullglob
 declare -A NAME_OF_UID=()
 declare -A UID_OF_NAME=()
 declare -A ROLE_OF_NAME=()
-declare -A PUBFILES_OF_NAME=()
+declare -A BACKUP_PUBFILES_OF_NAME=()
+declare -A ADMIN_PUBFILES_OF_NAME=()
 ERRORS=()
 
 # Borg-Binary fuer einen Key: "borg" oder "borg-<version>" aus <key>.version.
@@ -94,27 +95,29 @@ validate_all() {
         backup_pubs=("${entry}keys/backup/"*.pub)
         admin_pubs=("${entry}keys/admin/"*.pub)
 
-        if [ "${#backup_pubs[@]}" -gt 0 ] && [ "${#admin_pubs[@]}" -gt 0 ]; then
-            ERRORS+=("users/${base}: hat Keys sowohl unter keys/backup/ als auch keys/admin/ - die Rolle muss eindeutig sein.")
-            continue
-        fi
         if [ "${#backup_pubs[@]}" -eq 0 ] && [ "${#admin_pubs[@]}" -eq 0 ]; then
             echo "WARNUNG: users/${base} hat keinen Key, wird uebersprungen." >&2
             continue
         fi
 
-        if [ "${#backup_pubs[@]}" -gt 0 ]; then
+        # Eine Identitaet darf beide Rollen gleichzeitig haben (z.B. ein
+        # Backup-Client, fuer dessen Repo zusaetzlich mehrere Admins vollen
+        # Zugriff bekommen sollen) - pro Key entscheidet allein, unter
+        # welchem keys/{backup,admin}/ er liegt, welches Forced Command er
+        # bekommt (siehe append_key_lines() in apply_all()).
+        if [ "${#backup_pubs[@]}" -gt 0 ] && [ "${#admin_pubs[@]}" -gt 0 ]; then
+            role="backup+admin"
+        elif [ "${#backup_pubs[@]}" -gt 0 ]; then
             role="backup"
-            PUBFILES_OF_NAME[${name}]="$(printf '%s\n' "${backup_pubs[@]}")"
         else
             role="admin"
-            PUBFILES_OF_NAME[${name}]="$(printf '%s\n' "${admin_pubs[@]}")"
         fi
+        [ "${#backup_pubs[@]}" -gt 0 ] && BACKUP_PUBFILES_OF_NAME[${name}]="$(printf '%s\n' "${backup_pubs[@]}")"
+        [ "${#admin_pubs[@]}" -gt 0 ] && ADMIN_PUBFILES_OF_NAME[${name}]="$(printf '%s\n' "${admin_pubs[@]}")"
 
-        while IFS= read -r pf; do
-            [ -n "${pf}" ] || continue
+        for pf in "${backup_pubs[@]}" "${admin_pubs[@]}"; do
             resolve_borg_binary "${pf}" >/dev/null || true
-        done <<< "${PUBFILES_OF_NAME[${name}]}"
+        done
 
         NAME_OF_UID[${uid_num}]="${name}"
         UID_OF_NAME[${name}]="${uid_num}"
@@ -131,67 +134,85 @@ validate_all() {
     fi
 }
 
+# Haengt fuer jeden Pubkey in $1 (newline-getrennte Liste, wie in
+# BACKUP_PUBFILES_OF_NAME/ADMIN_PUBFILES_OF_NAME abgelegt) eine
+# authorized_keys-Zeile mit Forced Command $2 an Datei $3 an. Gemeinsamer
+# Kern fuer beide Rollen, weil eine Identitaet inzwischen Keys in BEIDEN
+# Listen haben kann (siehe validate_all()).
+append_key_lines() {
+    local pubfiles="$1" command_suffix="$2" tmp_file="$3"
+    local pf pubkey binary from_file from_value prefix
+    while IFS= read -r pf; do
+        [ -n "${pf}" ] || continue
+        pubkey="$(cat "${pf}")"
+        binary="$(resolve_borg_binary "${pf}")"
+        prefix=""
+        from_file="${pf%.pub}.from"
+        if [ -f "${from_file}" ]; then
+            from_value="$(tr -d '[:space:]' < "${from_file}")"
+            [ -n "${from_value}" ] && prefix="from=\"${from_value}\","
+        fi
+        echo "${prefix}command=\"${binary} ${command_suffix}\",restrict ${pubkey}" >> "${tmp_file}"
+    done <<< "${pubfiles}"
+}
+
 apply_all() {
     mkdir -p "${AUTH_KEYS_DIR}"
     chown root:root "${AUTH_KEYS_DIR}"
     chmod 755 "${AUTH_KEYS_DIR}"
 
-    local name uid_num role home_dir tmp_file pf pubkey binary from_file from_value command_str prefix
+    local name uid_num role home_dir tmp_file has_backup has_admin
 
     for name in "${!UID_OF_NAME[@]}"; do
         uid_num="${UID_OF_NAME[${name}]}"
         role="${ROLE_OF_NAME[${name}]}"
         home_dir="${DATA_DIR}/${name}"
+        has_backup=""
+        has_admin=""
+        [ -n "${BACKUP_PUBFILES_OF_NAME[${name}]:-}" ] && has_backup=1
+        [ -n "${ADMIN_PUBFILES_OF_NAME[${name}]:-}" ] && has_admin=1
 
         if ! id "${name}" >/dev/null 2>&1; then
-            if [ "${role}" = "admin" ]; then
-                useradd --no-create-home --home-dir "${home_dir}" --uid "${uid_num}" \
-                    --shell /bin/bash --groups borgusers,borgadmins "${name}"
-            else
-                useradd --no-create-home --home-dir "${home_dir}" --uid "${uid_num}" \
-                    --shell /bin/bash --groups borgusers "${name}"
-            fi
+            useradd --no-create-home --home-dir "${home_dir}" --uid "${uid_num}" \
+                --shell /bin/bash --groups borgusers "${name}"
             # Gesperrtes Passwort (useradd-Default) reicht bei aktivem PAM
             # sshd nicht - "account is locked" trotz Pubkey-Auth. Absicherung
             # falls UsePAM je wieder aktiviert wird, siehe sshd_config.template.
             usermod -p '*' "${name}"
         fi
+        # -aG statt einmalig bei useradd: eine Identitaet, die ERST spaeter
+        # (nach dem initialen useradd) einen Admin-Key dazubekommt, braucht
+        # die Gruppenmitgliedschaft trotzdem - "if ! id" oben laeuft dann
+        # nicht mehr. -aG ist idempotent, kostet bei einem frischen Account
+        # nichts zusaetzlich. Kein automatisches Entfernen aus borgadmins bei
+        # Verlust der Admin-Rolle - passt zur "Entzug loescht nie"-Linie
+        # dieses Skripts, siehe CLAUDE.md.
+        [ -n "${has_admin}" ] && usermod -aG borgadmins "${name}"
 
         mkdir -p "${home_dir}"
-        if [ "${role}" = "admin" ]; then
-            chown "${name}:${name}" "${home_dir}"
-            chmod 700 "${home_dir}"
-        else
+        if [ -n "${has_backup}" ]; then
             # Gruppe "borgadmins" (statt privater Client-Gruppe) + Setgid
             # (2770): Admins brauchen Zugriff auf JEDES /data/<name>, und
             # neue Dateien darin muessen die Verzeichnisgruppe erben, sonst
             # bleiben sie trotz gruppen-lesbarem Verzeichnis unerreichbar.
             # Siehe CLAUDE.md fuer die volle Herleitung inkl. --umask unten.
+            # Gilt genauso, wenn dieselbe Identitaet zusaetzlich eigene
+            # Admin-Keys hat (role "backup+admin") - es bleibt IHR Repo.
             chown "${name}:borgadmins" "${home_dir}"
             chmod 2770 "${home_dir}"
+        else
+            chown "${name}:${name}" "${home_dir}"
+            chmod 700 "${home_dir}"
         fi
 
         tmp_file="$(mktemp "${AUTH_KEYS_DIR}/.${name}.XXXXXX")"
-        while IFS= read -r pf; do
-            [ -n "${pf}" ] || continue
-            pubkey="$(cat "${pf}")"
-            binary="$(resolve_borg_binary "${pf}")"
-            # --umask 0007 statt Borgs Default 0077, sonst wuerden Gruppen-
-            # Bits bei jeder neuen Datei sofort wieder verschwinden (macht
-            # das Setgid oben erst wirksam).
-            if [ "${role}" = "admin" ]; then
-                command_str="${binary} --umask 0007 serve --restrict-to-path ${DATA_DIR}"
-            else
-                command_str="${binary} --umask 0007 serve --append-only --restrict-to-repository ${home_dir}"
-            fi
-            prefix=""
-            from_file="${pf%.pub}.from"
-            if [ -f "${from_file}" ]; then
-                from_value="$(tr -d '[:space:]' < "${from_file}")"
-                [ -n "${from_value}" ] && prefix="from=\"${from_value}\","
-            fi
-            echo "${prefix}command=\"${command_str}\",restrict ${pubkey}" >> "${tmp_file}"
-        done <<< "${PUBFILES_OF_NAME[${name}]}"
+        # --umask 0007 statt Borgs Default 0077, sonst wuerden Gruppen-Bits
+        # bei jeder neuen Datei sofort wieder verschwinden (macht das
+        # Setgid oben erst wirksam).
+        [ -n "${has_backup}" ] && append_key_lines "${BACKUP_PUBFILES_OF_NAME[${name}]}" \
+            "--umask 0007 serve --append-only --restrict-to-repository ${home_dir}" "${tmp_file}"
+        [ -n "${has_admin}" ] && append_key_lines "${ADMIN_PUBFILES_OF_NAME[${name}]}" \
+            "--umask 0007 serve --restrict-to-path ${DATA_DIR}" "${tmp_file}"
 
         chown root:root "${tmp_file}"
         # 644, nicht 600: sshd liest eine authorized_keys-Datei ausserhalb

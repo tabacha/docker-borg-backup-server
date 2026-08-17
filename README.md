@@ -145,6 +145,9 @@ users/
         laptop.pub            # Pubkey
         laptop.version        # optional: feste Borg-Version fuer GENAU diesen Key
         laptop.from           # optional: "from="-Pattern (IP/CIDR), siehe unten
+      admin/
+        alice.pub             # zusaetzliche Admin-Rolle fuer DIESELBE
+        bob.pub                # Identitaet, siehe "Sicherheitsmodell" unten
   1001-buchhaltung/
     keys/
       backup/
@@ -169,9 +172,18 @@ mehrere gleichzeitig gültige Keys für **dieselbe** Identität — praktisch f�
 Rotation (alten und neuen Key parallel eintragen, alten danach löschen)
 oder für einen Admin mit mehreren Geräten/Keys.
 
+Eine Identität kann `keys/backup/` UND `keys/admin/` gleichzeitig haben —
+z.B. ein Backup-Client, für dessen eigenes Repo zusätzlich eine feste Liste
+von Personen vollen Admin-Zugriff (`prune`/`delete`/`compact`) bekommen
+soll, ohne dafür eine zweite, separate Identität samt eigener UID
+anzulegen. `add-admin-key.sh <name-der-backup-identitaet> <adminkey.pub>`
+ergänzt die Admin-Keys dann einfach unter derselben `users/<uid>-<name>/`.
+`build-authorized-keys.sh` trägt in diesem Fall beide Forced Commands
+parallel in dieselbe `authorized_keys/<name>`-Datei ein — welches greift,
+entscheidet einzig, welcher der beiden Keys sich verbindet.
+
 Findet `build-authorized-keys.sh` dabei einen **harten Fehler** (z.B. eine
-doppelt vergebene UID, eine UID außerhalb 1000–2000, oder eine Identität mit
-Keys sowohl unter `keys/backup/` als auch `keys/admin/`), wird **nichts**
+doppelt vergebene UID oder eine UID außerhalb 1000–2000), wird **nichts**
 übernommen — läuft der Container schon, bleibt der zuletzt gültige Stand
 vollständig unangetastet; startet er gerade erst, startet er gar nicht erst.
 Ein Tippfehler bei einer Identität legt also nie den Zugriff aller anderen
@@ -189,6 +201,11 @@ was der Client anfragt.
 |---|---|---|
 | Backup (`keys/backup/`) | `borg serve --append-only --restrict-to-repository /data/<name>` | Nur dieses eine Repo, nur anhängen — nichts endgültig löschen (siehe `docker-borg-backup`'s README "Sicherheit: zwei Schlüssel gegen Ransomware"). `--restrict-to-repository` erlaubt exakt diesen einen Pfad, keine Unterverzeichnisse. |
 | Admin (`keys/admin/`) | `borg serve --restrict-to-path /data` | Voller Zugriff (`prune`/`delete`/`compact`) auf jedes Repo unter `/data` — `--restrict-to-path` erlaubt (im Unterschied zu `--restrict-to-repository`) Unterverzeichnisse. Trotzdem kein Ausbruch aus `/data`, keine Shell. |
+
+Die Rolle hängt am einzelnen **Key** (welches Verzeichnis er in liegt), nicht
+an der Identität — eine Identität kann also Keys in `keys/backup/` UND
+`keys/admin/` gleichzeitig haben und bekommt dann beide Forced Commands,
+je nachdem, mit welchem der beiden Keys sich jemand verbindet.
 
 **Isolation zwischen Backup-Clients ist doppelt abgesichert, nicht nur
 einfach:** Zum einen verhindert `--restrict-to-repository` auf

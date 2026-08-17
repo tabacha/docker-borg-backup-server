@@ -165,10 +165,13 @@ Admin-Rolle) bekommt ein Forced Command (`command="borg serve ..."`) plus
 `restrict`. Es gibt keine interaktive Shell auf diesem Server — auch kein
 Admin-Account bekommt eine. `restrict` deaktiviert nebenbei
 Port-/Agent-Forwarding, PTY, X11. Die Unterscheidung Backup- vs.
-Admin-Rolle passiert über die Flags im Forced Command (jede Identität hat
-GENAU eine Rolle, siehe unten) - seit der Multi-User-Isolation zusätzlich
-über unterschiedliche Unix-Accounts, nicht mehr nur über den Inhalt eines
-gemeinsamen Forced Command wie frueher.
+Admin-Rolle passiert über die Flags im Forced Command - pro KEY, nicht pro
+Identität: eine Identität kann Keys in `keys/backup/` UND `keys/admin/`
+gleichzeitig haben und bekommt dann beide Forced Commands parallel in
+derselben `authorized_keys/<name>`-Datei (siehe "Ein Unix-Account pro
+Identität" unten) - seit der Multi-User-Isolation zusätzlich über
+unterschiedliche Unix-Accounts abgesichert, nicht mehr nur über den Inhalt
+eines gemeinsamen Forced Command wie frueher.
 
 ### `--restrict-to-repository` (Backup) vs. `--restrict-to-path` (Admin)
 
@@ -214,12 +217,28 @@ Mehrere `*.pub`-Dateien im selben `keys/backup/`/`keys/admin/` sind mehrere
 gleichzeitig gültige Keys für DIESELBE Identität (Rotation, mehrere Geräte)
 - kein Sondermechanismus dafür nötig, ergibt sich einfach aus dem Layout.
 
+**Eine Identität darf beide Rollen gleichzeitig haben** (Keys in sowohl
+`keys/backup/` als auch `keys/admin/`) - z.B. ein Backup-Client, für dessen
+eigenes Repo zusätzlich eine feste Liste von Personen vollen Admin-Zugriff
+bekommen soll, ohne dafür eine zweite Identität mit eigener UID anzulegen
+(`add-admin-key.sh <name-der-backup-identitaet> <adminkey.pub>`). In
+`build-authorized-keys.sh` ist das KEIN Sonderfall mehr auf Identitätsebene
+(`ROLE_OF_NAME` ist nur noch eine Beschriftung fürs Log), sondern
+`BACKUP_PUBFILES_OF_NAME`/`ADMIN_PUBFILES_OF_NAME` werden pro Identität
+unabhängig befüllt und in `apply_all()` beide (falls vorhanden) über
+`append_key_lines()` in dieselbe `authorized_keys/<name>`-Datei geschrieben
+- der Backup-Key bleibt dabei mit `--restrict-to-repository` beschränkt,
+der Admin-Key bekommt `--restrict-to-path /data`. Die Unix-Gruppen-/
+Verzeichnisrechte (`borgadmins`, Setgid 2770 auf `/data/<name>`, `--groups
+borgusers,borgadmins` beim `useradd`) richten sich in diesem Fall danach,
+OB die Identität überhaupt einen Backup- bzw. Admin-Key hat, nicht mehr
+danach, ob sie AUSSCHLIESSLICH die eine oder andere Rolle hat.
+
 **Zwei-Phasen-Ausführung, bewusst getrennt** (`validate_all()` /
 `apply_all()` in `build-authorized-keys.sh`): Phase 1 liest nur, verändert
 nichts, sammelt ALLE Fehler statt beim ersten abzubrechen. Findet sich
 dabei auch nur EIN harter Fehler (doppelt vergebene UID/Name, UID außerhalb
-1000-2000, eine Identität mit Keys in sowohl `keys/backup/` als auch
-`keys/admin/`, eine nicht installierte Borg-Version), wird GAR NICHTS
+1000-2000, eine nicht installierte Borg-Version), wird GAR NICHTS
 angewendet - weder ein neuer Account angelegt noch eine bestehende
 `authorized_keys/<name>`-Datei verändert. Läuft der Container schon, bleibt
 der zuletzt gültige Stand vollständig unangetastet (ein Tippfehler bei
