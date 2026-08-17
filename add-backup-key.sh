@@ -1,58 +1,66 @@
 #!/bin/bash
-#
-# Registriert einen neuen Backup-Client: legt dessen Public Key unter
-# keys/backup/<name>.pub ab. build-authorized-keys.sh (laeuft bei jedem
-# Container-Start) generiert daraus einen Eintrag in authorized_keys mit
-# Forced Command auf "<borg-binary> serve --append-only
-# --restrict-to-repository /data/<name>" - der Client kann also nur in
-# genau dieses Repo schreiben, nichts endgueltig loeschen, und keine Shell
-# bekommen.
-#
-# Ruft am Ende automatisch reload-keys.sh auf, damit der Key sofort aktiv
-# wird - ohne den Container neu zu starten und ohne laufende Sessions
-# anderer Clients zu unterbrechen. Laeuft der Container noch nicht (z.B. bei
-# der Ersteinrichtung), ist das kein Fehler, siehe reload-keys.sh.
-#
-# Usage: ./add-backup-key.sh <name> <pubkey-datei> [borg-version]
-#
-# [borg-version] ist optional (z.B. "1.2.8") und waehlt eine im Image
-# installierte, aeltere Borg-Version fuer diesen einen Client aus - siehe
-# README "Mehrere Borg-Versionen". Ohne Angabe kommt die Default-Version
-# des Images zum Einsatz.
+# Registriert einen Backup-Client-Key. Details: ./add-backup-key.sh --help
 
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NAME="${1:?Usage: add-backup-key.sh <name> <pubkey-datei> [borg-version]}"
-PUBKEY_FILE="${2:?Usage: add-backup-key.sh <name> <pubkey-datei> [borg-version]}"
-BORG_VERSION="${3:-}"
+UID_MIN=1000 # muss zu MIN_UID/MAX_UID in image/build-authorized-keys.sh passen
+UID_MAX=2000
+
+usage() {
+    cat <<'EOF'
+Usage: add-backup-key.sh <name> <pubkey-datei> [--uid N] [--version V] [--from PATTERN]
+
+Legt users/<uid>-<name>/keys/backup/<datei>.pub an und ruft reload-keys.sh.
+Existiert <name> schon, wird der Key als zusaetzlicher Key derselben
+Identitaet ergaenzt (z.B. fuer Rotation).
+
+  --uid N         feste UID fuer eine neue Identitaet (sonst automatisch,
+                   Bereich 1000-2000)
+  --version V     bindet diesen einen Key an eine bestimmte Borg-Version
+  --from PATTERN  bindet diesen einen Key an eine ssh "from="-Pattern-Liste
+
+Details: README.md ("Verzeichnisstruktur", "Mehrere Borg-Versionen",
+"Zugriff auf einen bestimmten Quell-IP-Bereich einschraenken").
+EOF
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+    exit 0
+fi
+[ $# -ge 2 ] || { usage >&2; exit 1; }
+NAME="$1"
+PUBKEY_FILE="$2"
+shift 2
+
+UID_OPT=""
+BORG_VERSION=""
+FROM_PATTERN=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --uid) UID_OPT="${2:?--uid braucht einen Wert}"; shift 2 ;;
+        --version) BORG_VERSION="${2:?--version braucht einen Wert}"; shift 2 ;;
+        --from) FROM_PATTERN="${2:?--from braucht einen Wert}"; shift 2 ;;
+        *) echo "ERROR: unbekanntes Argument '$1'." >&2; usage >&2; exit 1 ;;
+    esac
+done
 
 if [[ ! "${NAME}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo "ERROR: <name> darf nur Buchstaben, Ziffern, '_' und '-' enthalten (wird als Verzeichnisname unter /data verwendet)." >&2
+    echo "ERROR: <name> darf nur Buchstaben, Ziffern, '_' und '-' enthalten." >&2
     exit 1
 fi
 
-if [ -s "${BASE_DIR}/keys/manual/authorized_keys" ]; then
-    echo "WARNUNG: keys/manual/authorized_keys existiert - der manuelle Modus ist aktiv," >&2
-    echo "keys/backup/ wird dabei komplett ignoriert. Dieser Key wird erst wirksam, wenn" >&2
-    echo "keys/manual/authorized_keys entfernt wird (siehe README 'Manueller Modus')." >&2
-fi
+USERS_DIR="${BASE_DIR}/users"
+mkdir -p "${USERS_DIR}"
 
-# Best-Effort-Check gegen SSHD_PUBKEY_ALGORITHMS (aus .env, sonst der
-# Default aus sshd_config.template) - nur eine Warnung, kein hartes
-# Abbrechen: bei RSA ist die Zuordnung nicht 1:1 (rsa-sha2-512/-256 sind
-# SIGNATUR-Algorithmen fuer den Key-TYP "ssh-rsa", tauchen also nie
-# woertlich in einer .pub-Datei auf), ein perfekter Check waere mehr
-# Komplexitaet als er wert ist. Ziel ist nur, den haeufigsten Fehler (z.B.
-# aus Versehen einen RSA-Key ohne SSHD_PUBKEY_ALGORITHMS-Anpassung
-# eingetragen) VOR dem naechsten ./reload-keys.sh sichtbar zu machen statt
-# erst beim naechsten fehlschlagenden Verbindungsversuch.
+# Best-Effort-Warnung, kein Abbruch - RSA-Key-Typ vs. Signatur-Algorithmus
+# ist nicht 1:1 zuordenbar (siehe README "SSH-Haertung").
 PUBKEY_ALGORITHMS="ssh-ed25519,sk-ssh-ed25519@openssh.com"
 if [ -f "${BASE_DIR}/.env" ]; then
-    # "|| true": grep findet in der weit ueberwiegenden Mehrheit der Faelle
-    # NICHTS (SSHD_PUBKEY_ALGORITHMS ist standardmaessig auskommentiert) -
-    # ohne "|| true" wuerde grep's Exit-Code 1 unter "set -euo pipefail"
-    # das ganze Skript an dieser Stelle abbrechen (Bug, real aufgetreten).
+    # "|| true": SSHD_PUBKEY_ALGORITHMS ist in .env.example auskommentiert,
+    # grep findet also meist nichts - ohne "|| true" wuerde das unter
+    # "pipefail" das ganze Skript abbrechen.
     ENV_VALUE="$(grep -E '^SSHD_PUBKEY_ALGORITHMS=' "${BASE_DIR}/.env" | tail -n1 | cut -d= -f2- || true)"
     [ -n "${ENV_VALUE}" ] && PUBKEY_ALGORITHMS="${ENV_VALUE}"
 fi
@@ -67,45 +75,110 @@ if [ "${KEY_TYPE}" = "ssh-rsa" ]; then
         *",rsa-sha2-512,"*|*",rsa-sha2-256,"*) ACCEPTED=1 ;;
     esac
 fi
-
 if [ "${ACCEPTED}" -eq 0 ]; then
-    echo "WARNUNG: '${PUBKEY_FILE}' ist vom Typ '${KEY_TYPE}', taucht aber nicht erkennbar in" >&2
-    echo "SSHD_PUBKEY_ALGORITHMS='${PUBKEY_ALGORITHMS}' auf - die Verbindung koennte mit" >&2
-    echo "'Permission denied (publickey)' scheitern. Siehe README 'SSH-Haertung', ggf." >&2
-    echo "SSHD_PUBKEY_ALGORITHMS in der .env anpassen." >&2
+    echo "WARNUNG: '${PUBKEY_FILE}' (Typ '${KEY_TYPE}') taucht nicht erkennbar in" >&2
+    echo "SSHD_PUBKEY_ALGORITHMS='${PUBKEY_ALGORITHMS}' auf - Verbindung koennte" >&2
+    echo "mit 'Permission denied (publickey)' scheitern, siehe README 'SSH-Haertung'." >&2
 fi
 
-KEYS_DIR="${BASE_DIR}/keys/backup"
-mkdir -p "${KEYS_DIR}"
+# Existierende Identitaet mit demselben Namen wiederverwenden statt eine
+# zweite anzulegen (waere ohnehin ein harter Fehler in build-authorized-keys.sh).
+EXISTING_DIR=""
+EXISTING_UID=""
+EXISTING_ROLE=""
+for entry in "${USERS_DIR}"/*/; do
+    [ -d "${entry}" ] || continue
+    base="$(basename "${entry}")"
+    [[ "${base}" =~ ^([0-9]+)-([a-zA-Z0-9_-]+)$ ]] || continue
+    if [ "${BASH_REMATCH[2]}" = "${NAME}" ]; then
+        EXISTING_DIR="${entry}"
+        EXISTING_UID="${BASH_REMATCH[1]}"
+        if [ -n "$(compgen -G "${entry}keys/admin/*.pub")" ]; then
+            EXISTING_ROLE="admin"
+        fi
+        break
+    fi
+done
 
-if [ -f "${KEYS_DIR}/${NAME}.pub" ]; then
-    echo "ERROR: keys/backup/${NAME}.pub existiert schon - erst loeschen, wenn der Key ersetzt werden soll." >&2
+if [ -n "${EXISTING_ROLE}" ]; then
+    echo "ERROR: '${NAME}' ist schon als Admin-Identitaet registriert (${EXISTING_DIR}keys/admin/) - kann nicht gleichzeitig Backup-Rolle bekommen." >&2
     exit 1
 fi
 
-cp "${PUBKEY_FILE}" "${KEYS_DIR}/${NAME}.pub"
+if [ -n "${EXISTING_DIR}" ]; then
+    if [ -n "${UID_OPT}" ] && [ "${UID_OPT}" != "${EXISTING_UID}" ]; then
+        echo "ERROR: '${NAME}' existiert schon mit UID ${EXISTING_UID} - --uid ${UID_OPT} passt nicht dazu." >&2
+        exit 1
+    fi
+    TARGET_UID="${EXISTING_UID}"
+    TARGET_DIR="${EXISTING_DIR}"
+    echo "Identitaet '${NAME}' existiert schon (uid ${TARGET_UID}) - Key wird ergaenzt."
+else
+    if [ -n "${UID_OPT}" ]; then
+        if [[ ! "${UID_OPT}" =~ ^[0-9]+$ ]] || [ "${UID_OPT}" -lt "${UID_MIN}" ] || [ "${UID_OPT}" -gt "${UID_MAX}" ]; then
+            echo "ERROR: --uid muss eine Zahl zwischen ${UID_MIN} und ${UID_MAX} sein." >&2
+            exit 1
+        fi
+        if compgen -G "${USERS_DIR}/${UID_OPT}-*" >/dev/null; then
+            echo "ERROR: UID ${UID_OPT} ist schon vergeben (users/${UID_OPT}-*)." >&2
+            exit 1
+        fi
+        TARGET_UID="${UID_OPT}"
+    else
+        HIGHEST_UID=$((UID_MIN - 1))
+        for entry in "${USERS_DIR}"/*/; do
+            [ -d "${entry}" ] || continue
+            base="$(basename "${entry}")"
+            [[ "${base}" =~ ^([0-9]+)-([a-zA-Z0-9_-]+)$ ]] || continue
+            [ "${BASH_REMATCH[1]}" -gt "${HIGHEST_UID}" ] && HIGHEST_UID="${BASH_REMATCH[1]}"
+        done
+        TARGET_UID=$((HIGHEST_UID < UID_MIN ? UID_MIN : HIGHEST_UID + 1))
+        if [ "${TARGET_UID}" -gt "${UID_MAX}" ]; then
+            echo "ERROR: UID-Bereich ${UID_MIN}-${UID_MAX} ist ausgeschoepft - --uid mit einer freien Nummer angeben oder den Bereich erweitern." >&2
+            exit 1
+        fi
+    fi
+    TARGET_DIR="${USERS_DIR}/${TARGET_UID}-${NAME}/"
+fi
+
+KEYS_DIR="${TARGET_DIR}keys/backup"
+mkdir -p "${KEYS_DIR}"
+
+SRC_BASENAME="$(basename "${PUBKEY_FILE}")"
+case "${SRC_BASENAME}" in
+    *.pub) KEY_FILE_NAME="${SRC_BASENAME}" ;;
+    *) KEY_FILE_NAME="${SRC_BASENAME}.pub" ;;
+esac
+
+if [ -f "${KEYS_DIR}/${KEY_FILE_NAME}" ]; then
+    echo "ERROR: ${KEYS_DIR}/${KEY_FILE_NAME} existiert schon - erst loeschen, wenn der Key ersetzt werden soll." >&2
+    exit 1
+fi
+
+cp "${PUBKEY_FILE}" "${KEYS_DIR}/${KEY_FILE_NAME}"
 
 REMOTE_PATH="borg"
 if [ -n "${BORG_VERSION}" ]; then
-    echo "${BORG_VERSION}" > "${KEYS_DIR}/${NAME}.version"
+    echo "${BORG_VERSION}" > "${KEYS_DIR}/${KEY_FILE_NAME%.pub}.version"
     REMOTE_PATH="borg-${BORG_VERSION}"
 fi
+if [ -n "${FROM_PATTERN}" ]; then
+    echo "${FROM_PATTERN}" > "${KEYS_DIR}/${KEY_FILE_NAME%.pub}.from"
+fi
 
-echo "Backup-Key '${NAME}' hinzugefuegt (keys/backup/${NAME}.pub)."
+echo "Backup-Key '${NAME}' hinzugefuegt (${KEYS_DIR}/${KEY_FILE_NAME}, uid ${TARGET_UID})."
 echo
 "${BASE_DIR}/reload-keys.sh"
 echo
 echo "Werte fuer die .env des Clients (docker-borg-backup):"
 echo "  BORG_SSH_HOST=<Hostname/IP dieses Servers>"
 echo "  BORG_SSH_PORT=<SSH_PORT aus der .env hier, Default 2222>"
-echo "  BORG_SSH_USER=borg"
+echo "  BORG_SSH_USER=${NAME}"
 echo "  BORG_REPO_PATH=/data/${NAME}"
 echo "  BORG_REMOTE_PATH=${REMOTE_PATH}"
 if [ -n "${BORG_VERSION}" ]; then
     echo
-    echo "Hinweis: BORG_REMOTE_PATH wird hier nur informativ ausgegeben - der"
-    echo "Server ignoriert, was der Client tatsaechlich anfragt (Forced"
-    echo "Command), und benutzt so oder so fest '${REMOTE_PATH}' fuer diesen"
-    echo "Key. BORG_REMOTE_PATH beim Client trotzdem passend setzen, damit"
-    echo "beide Seiten fuer Menschen nachvollziehbar dieselbe Version nennen."
+    echo "Hinweis: BORG_REMOTE_PATH ist hier nur Doku fuer Menschen - der Server"
+    echo "ignoriert per Forced Command, was der Client anfragt, und benutzt so oder"
+    echo "so fest '${REMOTE_PATH}' fuer diesen Key."
 fi

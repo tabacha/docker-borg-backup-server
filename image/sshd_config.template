@@ -62,7 +62,16 @@ PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
-AuthorizedKeysFile /home/%u/.ssh/authorized_keys
+
+# Zentral, root-verwaltet (siehe build-authorized-keys.sh), NICHT
+# "~/.ssh/authorized_keys" - $HOME ist bei Backup-Clients /data/<name>,
+# also dieselbe Datenverzeichnis-Ebene, die "borg serve" fuer diese
+# Identitaet beschreiben darf. Wuerde authorized_keys DORT liegen, waere
+# StrictModes zwar formal noch erfuellbar, aber die Datei laege unnoetig
+# nah an dem, was ein kompromittierter Client ohnehin schon anfassen darf -
+# ein eigener, fuer keine Identitaet erreichbarer Pfad ist die klarere
+# Trennung.
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u
 HostbasedAuthentication no
 PermitEmptyPasswords no
 PermitUserEnvironment no
@@ -72,7 +81,21 @@ PermitUserEnvironment no
 # angelegten User (der ohne -p ein gesperrtes Passwort hat) ablehnen.
 UsePAM no
 
-AllowUsers borg
+# Identitaeten werden dynamisch angelegt (siehe build-authorized-keys.sh),
+# eine feste Namensliste per "AllowUsers" ginge deshalb nicht. Stattdessen
+# eine gemeinsame Gruppe, in die JEDER dynamisch angelegte Account kommt
+# (Backup- wie Admin-Rolle) - reiner Fallback-Riegel, falls aus irgendeinem
+# Grund je ein Account existiert, der nicht ueber build-authorized-keys.sh
+# entstanden ist.
+AllowGroups borgusers
+
+# Kein natives sshd_config-Aequivalent zu "nur UID 1000-2000 duerfen sich
+# verbinden" - Allow/Deny-Direktiven und "Match" kennen nur Namen-/Gruppen-
+# Muster, keine numerischen UID-Bereiche. Der UID-Bereich wird deshalb dort
+# durchgesetzt, wo Accounts ueberhaupt erst entstehen (build-
+# authorized-keys.sh, MIN_UID/MAX_UID) - "AllowGroups borgusers" oben
+# funktioniert als Gate nur, WEIL ausschliesslich dieses eine Skript je
+# einen User in die Gruppe "borgusers" aufnimmt.
 
 X11Forwarding no
 AllowTcpForwarding no
@@ -95,7 +118,12 @@ Compression no
 PerSourcePenalties crash:90 authfail:5 noauth:1 grace-exceeded:10 refuseconnection:10 max:600 min:15
 
 LogLevel VERBOSE
-MaxAuthTries 3
+# Per SSHD_MAX_AUTH_TRIES ueberschreibbar (Default 3, siehe .env.example) -
+# zaehlt JEDEN angebotenen Key, nicht nur den am Ende erfolgreichen. Ein
+# Client mit vielen Keys im ssh-agent (ohne "-o IdentitiesOnly=yes")
+# handelt sich damit trotz gueltigem Key ein "Too many authentication
+# failures" statt eines klaren "Permission denied" ein.
+MaxAuthTries __MAX_AUTH_TRIES__
 MaxSessions 2
 LoginGraceTime 20
 VersionAddendum none

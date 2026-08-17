@@ -1,16 +1,24 @@
 #!/bin/bash
-#
-# Erzeugt secrets/ssh_host_ed25519_key (+.pub) fuer die Ersteinrichtung -
-# der SSH-Hostkey, ueber den sich Clients diesen Server merken (known_hosts).
-# Idempotent: existiert der Key schon, wird er nicht angefasst.
-#
-# WICHTIG: Dieser Key muss über Container-Neustarts hinweg stabil bleiben,
-# sonst sehen alle Clients bei jedem Neustart eine
-# "REMOTE HOST IDENTIFICATION HAS CHANGED"-Warnung. Deshalb liegt er in
-# secrets/ auf dem Host und wird nur read-only in den Container gemountet
-# (siehe compose.yml), statt vom Container selbst erzeugt zu werden.
+# Erzeugt secrets/ssh_host_ed25519_key (+.pub), idempotent.
+# Details: ./setup-secrets.sh --help
 
 set -euo pipefail
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    cat <<'EOF'
+Usage: setup-secrets.sh
+
+Erzeugt einmalig secrets/ssh_host_ed25519_key (+.pub) - der SSH-Hostkey,
+über den sich Clients diesen Server merken (known_hosts). Existiert der
+Key schon, wird nichts angefasst.
+
+Muss über Container-Neustarts hinweg stabil bleiben (sonst "REMOTE HOST
+IDENTIFICATION HAS CHANGED" bei jedem Client) - liegt deshalb auf dem Host
+und wird nur read-only in den Container gemountet, statt dort erzeugt zu
+werden.
+EOF
+    exit 0
+fi
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECRETS_DIR="${BASE_DIR}/secrets"

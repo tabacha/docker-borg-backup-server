@@ -1,9 +1,5 @@
 .env
 secrets/*
 !secrets/.gitkeep
-keys/backup/*
-!keys/backup/.gitkeep
-keys/admin/*
-!keys/admin/.gitkeep
-keys/manual/*
-!keys/manual/.gitkeep
+users/*
+!users/.gitkeep
