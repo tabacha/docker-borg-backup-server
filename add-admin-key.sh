@@ -1,44 +1,40 @@
 #!/bin/bash
-#
-# Registriert einen neuen Admin-Key unter
-# users/<uid>-<name>/keys/admin/<dateiname>.pub. build-authorized-keys.sh
-# (laeuft bei jedem Container-Start und bei jedem reload-keys.sh) generiert
-# daraus einen Eintrag in /etc/ssh/authorized_keys/<name> mit Forced
-# Command auf "<borg-binary> serve --restrict-to-path /data" - voller
-# Zugriff (prune/delete/compact) auf jedes Repo unter /data, aber weiterhin
-# keine Shell und kein Ausbruch aus /data.
-#
-# Mehrere Admins (oder mehrere Geraete/Keys desselben Admins fuer
-# Rotation): entweder als eigene Identitaet (eigener <name>, eigene UID)
-# oder - falls derselbe <name> schon existiert - als zusaetzlicher Key
-# derselben Identitaet, genau wie bei add-backup-key.sh.
-#
-# Ruft am Ende automatisch reload-keys.sh auf, damit der Key sofort aktiv
-# wird - ohne den Container neu zu starten und ohne laufende Sessions
-# anderer Clients zu unterbrechen. Laeuft der Container noch nicht (z.B. bei
-# der Ersteinrichtung), ist das kein Fehler, siehe reload-keys.sh.
-#
-# Usage: ./add-admin-key.sh <name> <pubkey-datei> [--uid N] [--version V] [--from PATTERN]
-#
-# Bedeutung der Optionen: siehe add-backup-key.sh.
+# Registriert einen Admin-Key. Details: ./add-admin-key.sh --help
 
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+UID_MIN=1000 # muss zu MIN_UID/MAX_UID in image/build-authorized-keys.sh passen
+UID_MAX=2000
 
 usage() {
-    echo "Usage: add-admin-key.sh <name> <pubkey-datei> [--uid N] [--version V] [--from PATTERN]" >&2
-    exit 1
+    cat <<'EOF'
+Usage: add-admin-key.sh <name> <pubkey-datei> [--uid N] [--version V] [--from PATTERN]
+
+Legt users/<uid>-<name>/keys/admin/<datei>.pub an und ruft reload-keys.sh -
+voller Zugriff (prune/delete/compact) auf jedes Repo unter /data. Existiert
+<name> schon, wird der Key als zusaetzlicher Key derselben Identitaet
+ergaenzt (mehrere Admins/Geraete/Rotation).
+
+  --uid N         feste UID fuer eine neue Identitaet (sonst automatisch,
+                   Bereich 1000-2000)
+  --version V     bindet diesen einen Key an eine bestimmte Borg-Version
+  --from PATTERN  bindet diesen einen Key an eine ssh "from="-Pattern-Liste
+
+Admin-Keys nie als Datei auf einem gesicherten Host ablegen - nur im
+eigenen SSH-Agent (idealerweise Hardware-Token), siehe README 'Sicherheit'
+in docker-borg-backup.
+EOF
 }
 
-[ $# -ge 2 ] || usage
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+    exit 0
+fi
+[ $# -ge 2 ] || { usage >&2; exit 1; }
 NAME="$1"
 PUBKEY_FILE="$2"
 shift 2
-
-# Muss zu MIN_UID/MAX_UID in build-authorized-keys.sh passen, siehe dort.
-UID_MIN=1000
-UID_MAX=2000
 
 UID_OPT=""
 BORG_VERSION=""
@@ -48,7 +44,7 @@ while [ $# -gt 0 ]; do
         --uid) UID_OPT="${2:?--uid braucht einen Wert}"; shift 2 ;;
         --version) BORG_VERSION="${2:?--version braucht einen Wert}"; shift 2 ;;
         --from) FROM_PATTERN="${2:?--from braucht einen Wert}"; shift 2 ;;
-        *) echo "ERROR: unbekanntes Argument '$1'." >&2; usage ;;
+        *) echo "ERROR: unbekanntes Argument '$1'." >&2; usage >&2; exit 1 ;;
     esac
 done
 
@@ -60,8 +56,7 @@ fi
 USERS_DIR="${BASE_DIR}/users"
 mkdir -p "${USERS_DIR}"
 
-# Best-Effort-Check gegen SSHD_PUBKEY_ALGORITHMS - siehe add-backup-key.sh,
-# identische Begruendung.
+# Best-Effort-Warnung, kein Abbruch - siehe add-backup-key.sh.
 PUBKEY_ALGORITHMS="ssh-ed25519,sk-ssh-ed25519@openssh.com"
 if [ -f "${BASE_DIR}/.env" ]; then
     ENV_VALUE="$(grep -E '^SSHD_PUBKEY_ALGORITHMS=' "${BASE_DIR}/.env" | tail -n1 | cut -d= -f2- || true)"
@@ -79,10 +74,9 @@ if [ "${KEY_TYPE}" = "ssh-rsa" ]; then
     esac
 fi
 if [ "${ACCEPTED}" -eq 0 ]; then
-    echo "WARNUNG: '${PUBKEY_FILE}' ist vom Typ '${KEY_TYPE}', taucht aber nicht erkennbar in" >&2
-    echo "SSHD_PUBKEY_ALGORITHMS='${PUBKEY_ALGORITHMS}' auf - die Verbindung koennte mit" >&2
-    echo "'Permission denied (publickey)' scheitern. Siehe README 'SSH-Haertung', ggf." >&2
-    echo "SSHD_PUBKEY_ALGORITHMS in der .env anpassen." >&2
+    echo "WARNUNG: '${PUBKEY_FILE}' (Typ '${KEY_TYPE}') taucht nicht erkennbar in" >&2
+    echo "SSHD_PUBKEY_ALGORITHMS='${PUBKEY_ALGORITHMS}' auf - Verbindung koennte" >&2
+    echo "mit 'Permission denied (publickey)' scheitern, siehe README 'SSH-Haertung'." >&2
 fi
 
 EXISTING_DIR=""
@@ -136,7 +130,7 @@ else
         done
         TARGET_UID=$((HIGHEST_UID < UID_MIN ? UID_MIN : HIGHEST_UID + 1))
         if [ "${TARGET_UID}" -gt "${UID_MAX}" ]; then
-            echo "ERROR: UID-Bereich ${UID_MIN}-${UID_MAX} ist ausgeschoepft - neue Identitaet braucht --uid mit einer noch freien Nummer in diesem Bereich (falls eine frei wurde) oder der Bereich muss in build-authorized-keys.sh/add-backup-key.sh/add-admin-key.sh erweitert werden." >&2
+            echo "ERROR: UID-Bereich ${UID_MIN}-${UID_MAX} ist ausgeschoepft - --uid mit einer freien Nummer angeben oder den Bereich erweitern." >&2
             exit 1
         fi
     fi
@@ -170,6 +164,5 @@ echo "Admin-Key '${NAME}' hinzugefuegt (${KEYS_DIR}/${KEY_FILE_NAME}, uid ${TARG
 echo
 "${BASE_DIR}/reload-keys.sh"
 echo
-echo "Dieser Key sollte NIE als Datei auf einem gesicherten Host liegen -"
-echo "nur im eigenen SSH-Agent des Admins (idealerweise Hardware-Token), siehe"
-echo "README 'Sicherheit' in docker-borg-backup."
+echo "Hinweis: Admin-Keys nie als Datei auf einem gesicherten Host ablegen -"
+echo "nur im eigenen SSH-Agent (idealerweise Hardware-Token)."

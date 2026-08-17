@@ -120,6 +120,10 @@ hier nur der Vollständigkeit halber erwähnt; Details dazu in
 | `image/`                     | Docker-Image-Interna (sshd-Config-Template, Entrypoint, Account-/Key-Erzeugung im Container) — siehe [DEVELOPMENT.md](DEVELOPMENT.md). |
 | `DEVELOPMENT.md`             | Für Mitarbeit am Repo selbst: lokale Checks, CI/Release-Pipeline, Details zu `image/`. |
 
+Alle Skripte im Root kennen `--help`/`-h` mit der vollständigen
+Optionsübersicht (z.B. `./add-backup-key.sh --help`) — hier nur der
+Überblick.
+
 ### `users/<uid>-<name>/` — eine Identität pro Verzeichnis
 
 Das ist die tatsächliche, persistente Konfiguration dieses Servers — wer
