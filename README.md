@@ -64,6 +64,13 @@ Durchsetzung davon (Forced Commands, Isolation, Append-Only).
    "Server läuft noch nicht" an dieser Stelle ist bei der Ersteinrichtung
    normal (Schritt 6 startet den Container erst) — kein Fehler.
 
+   `add-backup-key.sh` ist nur ein **Komfort-Wrapper**: es legt letztlich
+   nur `users/<uid>-<name>/keys/backup/<datei>.pub` an und ruft
+   `reload-keys.sh`. Die eigentliche, dauerhafte Konfiguration ist das
+   `users/`-Verzeichnis selbst — siehe "Verzeichnisstruktur" unten, falls
+   du das lieber direkt (oder aus einem eigenen Skript heraus) pflegen
+   willst, ganz ohne dieses Skript.
+
 5. **Optional: einen Admin-Key registrieren** (für `admin-compact.sh` /
    `admin-shell.sh` aus `docker-borg-backup`, per Agent-Forwarding, NIE als
    Datei ablegen):
@@ -71,6 +78,10 @@ Durchsetzung davon (Forced Commands, Isolation, Append-Only).
    ```bash
    ./add-admin-key.sh admin1 /pfad/zu/admin_key.pub
    ```
+
+   Genau wie `add-backup-key.sh` nur ein Komfort-Wrapper um
+   `users/<uid>-<name>/keys/admin/<datei>.pub` — siehe
+   "Verzeichnisstruktur" unten.
 
 6. **Docker-Volume + Image:**
 
@@ -96,15 +107,26 @@ Durchsetzung davon (Forced Commands, Isolation, Append-Only).
 | `entrypoint.sh`              | Rendert `sshd_config` aus dem Template, baut beim Start alle Accounts/Zugänge, leitet den Hostkey-Public-Part ab, startet `sshd`. |
 | `build-authorized-keys.sh`   | Erzeugt aus `users/<uid>-<name>/keys/{backup,admin}/*.pub` je Identität einen Unix-Account, ein `/data/<name>` und eine `authorized_keys`-Datei mit passendem Forced Command. Läuft beim Start UND bei Bedarf erneut im laufenden Container, siehe `reload-keys.sh`. |
 | `setup-secrets.sh`           | Erzeugt einmalig `secrets/ssh_host_ed25519_key` (idempotent). |
-| `add-backup-key.sh`          | Registriert einen neuen Backup-Client: `./add-backup-key.sh <name> <pubkey-datei>`. Ruft am Ende automatisch `reload-keys.sh` auf. |
-| `add-admin-key.sh`           | Registriert einen neuen Admin-Key: `./add-admin-key.sh <name> <pubkey-datei>`. Ruft am Ende automatisch `reload-keys.sh` auf. |
+| `add-backup-key.sh`          | **Komfort-Wrapper**, keine eigene Datenquelle: legt `users/<uid>-<name>/keys/backup/<datei>.pub` an und ruft danach `reload-keys.sh`. `./add-backup-key.sh <name> <pubkey-datei>`. |
+| `add-admin-key.sh`           | **Komfort-Wrapper**, analog für `users/<uid>-<name>/keys/admin/`. `./add-admin-key.sh <name> <pubkey-datei>`. |
 | `reload-keys.sh`             | Baut alle Zugänge im laufenden Container neu, ohne Neustart — unterbricht keine laufenden Sessions anderer Clients. Nach dem *manuellen* Ändern von `users/` selbst aufrufen. |
 | `.env` / `.env.example`      | `SSH_PORT`, optionale `SSHD_*`-Overrides. |
 | `secrets/`                   | SSH-Hostkey dieses Servers. Pro Deployment eigen, nicht committen. |
-| `users/`                     | Eine Identität pro `users/<uid>-<name>/` (Backup-Client oder Admin), siehe unten. Pro Deployment eigen, nicht committen. |
+| `users/`                     | **Die eigentliche, dauerhafte Konfiguration** dieses Servers — eine Identität pro `users/<uid>-<name>/` (Backup-Client oder Admin), siehe unten. Alles, was per Bind-Mount in den Container geht (neben `secrets/`). Pro Deployment eigen, nicht committen. |
 | `DEVELOPMENT.md`             | Für Mitarbeit am Repo selbst: lokale Checks, CI/Release-Pipeline. |
 
 ### `users/<uid>-<name>/` — eine Identität pro Verzeichnis
+
+Das ist die tatsächliche, persistente Konfiguration dieses Servers — wer
+sich verbinden darf, mit welcher Rolle, unter welchem Namen.
+`add-backup-key.sh`/`add-admin-key.sh` sind **nur Komfort-Wrapper** darum
+(UID automatisch vergeben, Datei an der richtigen Stelle ablegen,
+`reload-keys.sh` aufrufen) — wer lieber direkt editiert, per eigenem Skript
+automatisiert, oder die Dateien aus einer anderen Quelle (Config-
+Management, ein separater Provisionierungs-Schritt) hier reinreicht, kann
+`users/` genauso gut komplett ohne diese Skripte pflegen. `build-authorized-keys.sh`
+im Container kennt und braucht die beiden Skripte nicht — es liest
+ausschließlich `users/`.
 
 ```
 users/
@@ -137,13 +159,6 @@ Mehrere `*.pub`-Dateien im selben `keys/backup/` bzw. `keys/admin/` sind
 mehrere gleichzeitig gültige Keys für **dieselbe** Identität — praktisch für
 Rotation (alten und neuen Key parallel eintragen, alten danach löschen)
 oder für einen Admin mit mehreren Geräten/Keys.
-
-`add-backup-key.sh`/`add-admin-key.sh` decken den Normalfall ab. Wer mehr
-Kontrolle braucht (eigene `from=`-Restriction, eine bestehende
-`authorized_keys`-Zeile von woanders übernehmen), kann die Dateien unter
-`users/` auch direkt von Hand anlegen oder per Bind-Mount von außen
-reinreichen — kein Skriptaufruf nötig, `build-authorized-keys.sh` liest
-`users/` bei jedem Start und jedem `reload-keys.sh` ohnehin frisch ein.
 
 Findet `build-authorized-keys.sh` dabei einen **harten Fehler** (z.B. eine
 doppelt vergebene UID, eine UID außerhalb 1000–2000, oder eine Identität mit
@@ -313,8 +328,36 @@ zusätzlich auf diese Quelladressen beschränkt:
 
 Neuen Key eintragen: `add-backup-key.sh`/`add-admin-key.sh` rufen
 `reload-keys.sh` am Ende automatisch selbst auf, kein weiterer Schritt
-nötig. Nur bei *manuellen* Änderungen unter `users/` danach selbst
-aufrufen:
+nötig. Für den umgekehrten Weg — einen Key **zurückziehen** — gibt es
+bewusst kein `remove-backup-key.sh`: einfach die Datei bzw. das ganze
+Verzeichnis unter `users/` löschen und danach selbst `./reload-keys.sh`
+aufrufen.
+
+**Einzelnen Key zurückziehen** (Identität bleibt, andere Keys derselben
+Identität bleiben gültig — z.B. nach Abschluss einer Rotation):
+
+```bash
+rm users/1000-toolsserver/keys/backup/altes-geraet.pub
+./reload-keys.sh
+```
+
+**Ganze Identität zurückziehen** (kein Login mehr für `toolsserver`
+möglich, egal wie viele Keys sie hatte):
+
+```bash
+rm -rf users/1000-toolsserver
+./reload-keys.sh
+```
+
+In beiden Fällen bleiben der Unix-Account und `/data/toolsserver` mit allen
+Backup-Daten unangetastet — nur der SSH-Zugriff wird entzogen (siehe unten).
+Willst du stattdessen wirklich auch die Backup-Daten löschen, ist das ein
+bewusster, separater Schritt (`docker compose exec borg-server rm -rf
+/data/toolsserver` bzw. das Volume direkt), den kein Skript hier automatisch
+miterledigt.
+
+Bei manuellen Änderungen unter `users/` (Hinzufügen wie Entziehen) danach
+selbst aufrufen:
 
 ```bash
 ./reload-keys.sh
